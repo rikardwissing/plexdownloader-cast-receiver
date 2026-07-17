@@ -1,20 +1,27 @@
 // PlexDownloader custom receiver.
 //
-// Default CAF playback for everything the default receiver handled (direct
-// files, HLS packages), plus:
+// STOCK CAF playback UI (native controls — touch, remotes, and the default
+// overlays all behave like any Cast app), with the app's branding on the
+// idle and loading screens, plus:
 //  - a diagnostics channel: the sender can ask what THIS device's MSE
 //    actually decodes (the per-device answer to every "does it support X?"
 //    question);
 //  - the MSE engine: progressive MP4s flagged by the sender are demuxed
-//    in-browser (mp4box.js) and fed to MediaSource per-track, which is what
-//    makes audio switching on a direct file possible at all — the sender
-//    says "switch", the audio SourceBuffer is refilled from the live
-//    position, video never reloads.
+//    in-browser (mp4box.js) and fed to MediaSource per-track — audio
+//    switches without the video reloading.
+//
+// ?preview=idle|loading renders those screens in a normal browser.
 'use strict';
 
 const NS = 'urn:x-cast:com.rikard.plexdownloader';
-const context = cast.framework.CastReceiverContext.getInstance();
-const playerManager = context.getPlayerManager();
+const PREVIEW = new URLSearchParams(location.search).get('preview');
+
+let context = null;
+let playerManager = null;
+if (!PREVIEW) {
+  context = cast.framework.CastReceiverContext.getInstance();
+  playerManager = context.getPlayerManager();
+}
 
 // ---------------------------------------------------------------- diagnostics
 
@@ -39,8 +46,81 @@ function capabilities() {
 // Receiver-side logging lands in the sender's diagnostics file (CASTLOG
 // receiver message) — the only eyes we have on this code in the field.
 function slog(msg) {
+  if (PREVIEW) { console.log(msg); return; }
   try { context.sendCustomMessage(NS, undefined, { type: 'log', msg: String(msg) }); }
   catch (e) { /* no sender connected */ }
+}
+
+// ------------------------------------------------------------ brand screens
+// Idle and loading only — playback is entirely the stock player's.
+
+const Screens = {
+  els: {},
+  errorTimer: null,
+  boot() {
+    this.els = {
+      idle: document.querySelector('#idle'),
+      loading: document.querySelector('#loading'),
+      poster: document.querySelector('#loading .poster'),
+      title: document.querySelector('#loading .title'),
+      error: document.querySelector('#error'),
+      errorHeadline: document.querySelector('#error .headline'),
+      errorDetail: document.querySelector('#error .detail'),
+    };
+  },
+  show(name) {
+    clearTimeout(this.errorTimer);
+    this.els.idle.style.display = name === 'idle' ? 'flex' : 'none';
+    this.els.loading.style.display = name === 'loading' ? 'flex' : 'none';
+    this.els.error.style.display = name === 'error' ? 'flex' : 'none';
+  },
+  // The failure screen names the likely cause, then falls back to idle —
+  // unless a recovery load (the sender's convert-and-cast flow) replaces it
+  // first via the LOAD interceptor.
+  error(headline, detail) {
+    this.els.errorHeadline.textContent = headline;
+    this.els.errorDetail.textContent = detail || '';
+    this.show('error');
+    this.errorTimer = setTimeout(() => this.show('idle'), 12000);
+  },
+  loading(title, posterUrl) {
+    this.els.title.textContent = title || '';
+    if (posterUrl) {
+      this.els.poster.src = posterUrl;
+      this.els.poster.classList.remove('empty');
+    } else {
+      this.els.poster.removeAttribute('src');
+      this.els.poster.classList.add('empty');
+    }
+    this.show('loading');
+  },
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  Screens.boot();
+  Screens.show('idle');
+  if (PREVIEW === 'loading') {
+    Screens.loading('Bluey — S03E01 — Perfect',
+                    'https://placehold.co/400x400/1a1b2e/f59e42?text=B');
+  } else if (PREVIEW === 'error') {
+    Screens.error("Can't play this video",
+                  "This device can't decode the video or audio format.");
+  }
+});
+
+// What to tell the room, per DetailedErrorCode family. 1xx are the media
+// element's own failures (decode/format), 3xx segment/network, 4xx manifest.
+function errorMessage(code) {
+  if (code === 102 || code === 104 || code === 110) {
+    return "This device can't decode the video or audio format.";
+  }
+  if (code === 103 || (code >= 300 && code < 400)) {
+    return 'The stream could not be fetched from the sender.';
+  }
+  if (code >= 400 && code < 500) {
+    return "The stream's playlist could not be read.";
+  }
+  return 'Something went wrong during playback.';
 }
 
 // ---------------------------------------------------------------- MSE engine
@@ -91,7 +171,12 @@ class MseEngine {
     try {
       this.buffers.video = this.mediaSource.addSourceBuffer(vMime);
       this.buffers.audio = this.mediaSource.addSourceBuffer(this.audioMimeFor(audio));
-    } catch (e) { slog('engine addSourceBuffer failed: ' + e + ' ' + vMime); return; }
+    } catch (e) {
+      slog('engine addSourceBuffer failed: ' + e + ' ' + vMime);
+      Screens.error("Can't play this video",
+                    "This device can't decode the video or audio format.");
+      return;
+    }
     for (const kind of ['video', 'audio']) {
       this.buffers[kind].addEventListener('updateend', () => this.drain(kind));
       this.buffers[kind].addEventListener('error', () => slog('engine ' + kind + ' buffer error'));
@@ -266,14 +351,21 @@ function teardownEngine() {
 
 // ---------------------------------------------------------------- CAF wiring
 
-// LOAD: media the sender flagged (customData.mseEngine) plays through the
-// engine — CAF just sees a blob URL and drives play/pause/time as usual.
-// Everything else (packages, Dolby direct files) keeps default playback.
-playerManager.setMessageInterceptor(
-  cast.framework.messages.MessageType.LOAD, (request) => {
+if (!PREVIEW) {
+  const messages = cast.framework.messages;
+  const events = cast.framework.events;
+
+  // LOAD: brand loading screen while the stream spins up, and route flagged
+  // media through the MSE engine — CAF just sees a blob URL and drives
+  // play/pause/time as usual. Everything else (packages, Dolby direct files)
+  // keeps default playback.
+  playerManager.setMessageInterceptor(messages.MessageType.LOAD, (request) => {
     teardownEngine();
     const media = request.media || {};
     const custom = media.customData || {};
+    const meta = media.metadata || {};
+    const poster = (meta.images && meta.images[0] && meta.images[0].url) || null;
+    Screens.loading(meta.title || '', poster);
     if (custom.mseEngine && window.MediaSource && typeof MP4Box !== 'undefined') {
       const url = media.contentUrl || media.contentId;
       engine = new MseEngine(url, custom.audioTypeIndex || 0);
@@ -285,27 +377,38 @@ playerManager.setMessageInterceptor(
     return request;
   });
 
-// SEEK: CAF moves the media element; the engine must move the demux too.
-playerManager.setMessageInterceptor(
-  cast.framework.messages.MessageType.SEEK, (request) => {
+  // SEEK: CAF moves the media element; the engine must move the demux too.
+  playerManager.setMessageInterceptor(messages.MessageType.SEEK, (request) => {
     if (engine && typeof request.currentTime === 'number') {
       engine.reposition(request.currentTime);
     }
     return request;
   });
 
-// No teardown on MEDIA_FINISHED: casting into a live session fires the OLD
-// media's finish while the new engine is loading (that killed the first
-// engine cast in the field). The LOAD interceptor is the teardown point.
+  // No teardown on MEDIA_FINISHED: casting into a live session fires the OLD
+  // media's finish while the new engine is loading (that killed the first
+  // engine cast in the field). The LOAD interceptor is the teardown point.
 
-context.addCustomMessageListener(NS, (event) => {
-  const msg = event.data || {};
-  if (msg.type === 'ping') {
-    context.sendCustomMessage(NS, event.senderId,
-                              { type: 'pong', capabilities: capabilities() });
-  } else if (msg.type === 'setAudioTrack' && engine) {
-    engine.setAudioTrack(msg.audioTypeIndex || 0);
-  }
-});
+  playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE,
+                                 () => Screens.show('playback'));
+  playerManager.addEventListener(events.EventType.MEDIA_FINISHED,
+                                 () => Screens.show('idle'));
+  playerManager.addEventListener(events.EventType.ERROR, (e) => {
+    const code = (e && e.detailedErrorCode) || 0;
+    slog('player error: detailedErrorCode=' + code +
+         (e && e.error ? ' ' + JSON.stringify(e.error) : ''));
+    Screens.error("Can't play this video", errorMessage(code));
+  });
 
-context.start();
+  context.addCustomMessageListener(NS, (event) => {
+    const msg = event.data || {};
+    if (msg.type === 'ping') {
+      context.sendCustomMessage(NS, event.senderId,
+                                { type: 'pong', capabilities: capabilities() });
+    } else if (msg.type === 'setAudioTrack' && engine) {
+      engine.setAudioTrack(msg.audioTypeIndex || 0);
+    }
+  });
+
+  context.start();
+}
