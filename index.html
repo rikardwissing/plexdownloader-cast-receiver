@@ -2,92 +2,138 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>PlexDownloader</title>
+<title>Plex Downloader</title>
+<link rel="icon" type="image/png" href="icon.png">
 <style>
-  /* Brand (BrandPalette.swift): warm amber on deep indigo. Playback uses the
-     STOCK CAF controls, tinted amber; only idle/loading wear our screens. */
+  /* Brand (BrandPalette.swift / design/brand-spec.md): warm amber on deep
+     indigo, the app's mark as the only logo. Playback itself is the STOCK CAF
+     player tinted amber — only idle, loading and failure wear our screens.
+
+     Written conservatively for Cast hardware: no `gap` (Chromium 84+) and no
+     `inset` (87+), since a first-generation Chromecast is far behind a phone.
+     Sizes are in vh/vw so one layout serves 720p, 1080p and 4K panels, and
+     every screen keeps a title-safe margin because TVs overscan. */
   :root {
-    --accent: rgb(245, 158, 66);
-    --accent-deep: rgb(232, 94, 82);
-    --deep: rgb(22, 23, 43);
+    --accent: rgb(245, 158, 66);      /* warm amber — the app's primary */
+    --coral: rgb(232, 94, 82);        /* glow gradient partner */
+    --violet: rgb(158, 120, 240);     /* ambient light only */
+    --deep: rgb(22, 23, 43);          /* deep indigo surface */
+    --ink: #ECEAF3;
+    --muted: rgba(236, 234, 243, 0.58);
   }
   html, body {
     margin: 0; width: 100%; height: 100%; overflow: hidden;
-    background: var(--deep);
+    background: rgb(22, 23, 43); background: var(--deep);
     font-family: -apple-system, 'SF Pro Text', Roboto, 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
-    color: #fff;
+    color: #ECEAF3; color: var(--ink);
     cursor: none;
   }
   cast-media-player {
     --theme-hue: 28;
     --progress-color: var(--accent);
     --splash-image: none;
-    --logo-image: none;
+    /* Brands the stock surfaces we don't draw ourselves. */
+    --logo-image: url(icon.png);
   }
-  video#mse { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; display: none; }
+  video#mse {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    width: 100%; height: 100%; background: #000; display: none;
+  }
 
-  #idle {
-    position: absolute; inset: 0; display: flex;
+  /* "Projector in a dark room": warm amber light spilling onto deep indigo,
+     the same ambience as the app's launch screen and the browser receivers. */
+  .screen {
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    display: none;
     flex-direction: column; align-items: center; justify-content: center;
-    gap: 3.2vh;
+    padding: 5vh 6vw;                 /* title-safe: TVs crop the edges */
+    text-align: center;
     background:
       radial-gradient(120vw 90vh at 18% -12%, rgba(245,158,66,0.16), transparent 55%),
       radial-gradient(90vw 70vh at 88% 108%, rgba(158,120,240,0.12), transparent 60%),
-      var(--deep);
+      rgb(22, 23, 43);
   }
-  #idle .mark {
-    width: 13vh; height: 13vh; border-radius: 24%;
-    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 2.2vh 7vh rgba(245,158,66,0.35);
-  }
-  #idle .mark svg { width: 58%; height: 58%; }
-  #idle .name { font-size: 4.6vh; font-weight: 700; letter-spacing: 0.01em; }
-  #idle .hint { font-size: 2.5vh; color: rgba(255,255,255,0.55); font-weight: 500; }
+  #idle { display: flex; }
 
-  #loading {
-    position: absolute; inset: 0; display: none;
-    flex-direction: column; align-items: center; justify-content: center; gap: 3.4vh;
-    background:
-      radial-gradient(120vw 90vh at 18% -12%, rgba(245,158,66,0.16), transparent 55%),
-      radial-gradient(90vw 70vh at 88% 108%, rgba(158,120,240,0.12), transparent 60%),
-      var(--deep);
+  /* The app mark. The PNG is a square with the indigo baked in, so the corner
+     radius is ours (same treatment as the browser receivers) — it reads as the
+     app icon rather than a pasted tile. The amber shadow lifts it off the
+     background the way the icon sits on a home screen. */
+  .mark {
+    width: 15vh; height: 15vh; display: block;
+    border-radius: 22%;
+    box-shadow: 0 2.4vh 7vh rgba(245,158,66,0.34);
   }
+  .wordmark {
+    margin: 3.4vh 0 0;
+    font-size: 1.9vh; font-weight: 700;
+    letter-spacing: 0.42em; text-transform: uppercase;
+    color: rgb(245, 158, 66); color: var(--accent);
+  }
+  .headline { margin: 1.8vh 0 0; font-size: 4.4vh; font-weight: 600; letter-spacing: 0.005em; }
+  .hint { margin: 1.6vh 0 0; font-size: 2.4vh; font-weight: 500; color: var(--muted); }
+
+  /* Loading and failure keep the app identity in the corner, so the screen is
+     never anonymous while a poster or a message is centred. */
+  .watermark {
+    position: absolute; top: 5vh; left: 6vw;
+    display: flex; align-items: center;
+  }
+  .watermark img { width: 5.6vh; height: 5.6vh; display: block; border-radius: 22%; }
+  .watermark span {
+    margin-left: 1.6vh;
+    font-size: 1.7vh; font-weight: 700;
+    letter-spacing: 0.34em; text-transform: uppercase;
+    color: var(--muted);
+  }
+
   #loading .poster {
-    max-height: 46vh; max-width: 60vw; border-radius: 1.6vh;
+    max-height: 44vh; max-width: 56vw;
+    border-radius: 1.6vh;
     box-shadow: 0 3vh 9vh rgba(0,0,0,0.6);
   }
+  /* No artwork: the mark stands in, so the screen still reads as ours. */
   #loading .poster.empty { display: none; }
-  #loading .title { font-size: 3.2vh; font-weight: 600; max-width: 80vw;
-    text-align: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #loading .placeholder { display: none; }
+  #loading .poster.empty ~ .placeholder { display: block; }
+  #loading .title {
+    margin: 3.2vh 0 0;
+    font-size: 3.2vh; font-weight: 600; max-width: 74vw;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 
+  #error .mark-error {
+    width: 12vh; height: 12vh; border-radius: 26%;
+    background: linear-gradient(135deg, rgb(232, 94, 82), rgb(200, 62, 62));
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2.2vh 7vh rgba(232,94,82,0.38);
+  }
+  #error .mark-error svg { width: 52%; height: 52%; }
+  #error .headline { font-size: 3.8vh; font-weight: 700; max-width: 78vw; }
+  #error .detail {
+    margin: 1.4vh 0 0;
+    font-size: 2.4vh; font-weight: 500; color: var(--muted);
+    max-width: 62vw; line-height: 1.45;
+  }
+  /* A failure tints the ambience coral instead of amber. */
   #error {
-    position: absolute; inset: 0; display: none;
-    flex-direction: column; align-items: center; justify-content: center;
-    gap: 2.6vh; text-align: center;
     background:
       radial-gradient(120vw 90vh at 18% -12%, rgba(232,94,82,0.18), transparent 55%),
       radial-gradient(90vw 70vh at 88% 108%, rgba(158,120,240,0.10), transparent 60%),
-      var(--deep);
+      rgb(22, 23, 43);
   }
-  #error .mark {
-    width: 11vh; height: 11vh; border-radius: 24%;
-    background: linear-gradient(135deg, var(--accent-deep), rgb(200, 62, 62));
-    display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 2.2vh 7vh rgba(232,94,82,0.35);
-  }
-  #error .mark svg { width: 52%; height: 52%; }
-  #error .headline { font-size: 3.6vh; font-weight: 700; max-width: 80vw; }
-  #error .detail { font-size: 2.4vh; font-weight: 500;
-    color: rgba(255,255,255,0.62); max-width: 70vw; line-height: 1.4; }
 
   .spinner {
-    width: 4.6vh; height: 4.6vh; border-radius: 50%;
-    border: 0.55vh solid rgba(255,255,255,0.16);
+    width: 4.6vh; height: 4.6vh; margin: 3.4vh 0 0;
+    border-radius: 50%;
+    border: 0.55vh solid rgba(236,234,243,0.16);
+    border-top-color: rgb(245, 158, 66);
     border-top-color: var(--accent);
+    -webkit-animation: spin 0.9s linear infinite;
     animation: spin 0.9s linear infinite;
   }
+  @-webkit-keyframes spin { to { -webkit-transform: rotate(360deg); } }
   @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
@@ -95,22 +141,26 @@
 <cast-media-player></cast-media-player>
 <video id="mse" autoplay playsinline></video>
 
-<div id="idle">
-  <div class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M8 5.8c0-1.1 1.2-1.8 2.2-1.2l9.2 6.2c0.9 0.6 0.9 1.9 0 2.5l-9.2 6.2c-1 0.6-2.2-0.1-2.2-1.2V5.8z" fill="#fff"/></svg></div>
-  <div class="name">PlexDownloader</div>
-  <div class="hint">Select media to cast</div>
+<div id="idle" class="screen">
+  <img class="mark" src="icon.png" alt="">
+  <p class="wordmark">Plex Downloader</p>
+  <h1 class="headline">Ready to cast</h1>
+  <p class="hint">Pick something in the app to play it here</p>
 </div>
 
-<div id="loading">
+<div id="loading" class="screen">
+  <div class="watermark"><img src="icon.png" alt=""><span>Plex Downloader</span></div>
   <img class="poster empty" alt="">
+  <img class="placeholder mark" src="icon.png" alt="">
   <div class="title"></div>
   <div class="spinner"></div>
 </div>
 
-<div id="error">
-  <div class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4.5 2.8 19a1.2 1.2 0 0 0 1 1.8h16.4a1.2 1.2 0 0 0 1-1.8L12 4.5z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4.4" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="17.4" r="1.3" fill="#fff"/></svg></div>
-  <div class="headline"></div>
-  <div class="detail"></div>
+<div id="error" class="screen">
+  <div class="watermark"><img src="icon.png" alt=""><span>Plex Downloader</span></div>
+  <div class="mark-error"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4.5 2.8 19a1.2 1.2 0 0 0 1 1.8h16.4a1.2 1.2 0 0 0 1-1.8L12 4.5z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4.4" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="17.4" r="1.3" fill="#fff"/></svg></div>
+  <h1 class="headline"></h1>
+  <p class="detail"></p>
 </div>
 
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
