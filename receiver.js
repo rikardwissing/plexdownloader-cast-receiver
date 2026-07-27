@@ -1,4 +1,4 @@
-// PlexDownloader custom receiver.
+// Portage custom receiver.
 //
 // STOCK CAF playback UI (native controls — touch, remotes, and the default
 // overlays all behave like any Cast app), with the app's branding on the
@@ -13,7 +13,7 @@
 // ?preview=idle|loading renders those screens in a normal browser.
 'use strict';
 
-const NS = 'urn:x-cast:com.rikard.plexdownloader';
+const NS = 'urn:x-cast:dev.rikard.portage';
 const PREVIEW = new URLSearchParams(location.search).get('preview');
 
 let context = null;
