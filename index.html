@@ -5,32 +5,33 @@
 <title>Portage</title>
 <link rel="icon" type="image/png" href="icon.png">
 <style>
-  /* Brand (BrandPalette.swift / design/brand-spec.md): warm amber on deep
-     indigo, the app's mark as the only logo. Playback itself is the STOCK CAF
-     player tinted amber — only idle, loading and failure wear our screens.
+  /* Brand (BrandPalette.swift / design/brand-spec.md): electric cyan on
+     midnight navy, the app's mark as the only logo. Playback itself is the
+     STOCK CAF player tinted cyan — only idle, loading and failure wear our
+     screens.
 
      Written conservatively for Cast hardware: no `gap` (Chromium 84+) and no
      `inset` (87+), since a first-generation Chromecast is far behind a phone.
      Sizes are in vh/vw so one layout serves 720p, 1080p and 4K panels, and
      every screen keeps a title-safe margin because TVs overscan. */
   :root {
-    --accent: rgb(245, 158, 66);      /* warm amber — the app's primary */
-    --coral: rgb(232, 94, 82);        /* glow gradient partner */
-    --violet: rgb(158, 120, 240);     /* ambient light only */
-    --deep: rgb(22, 23, 43);          /* deep indigo surface */
-    --ink: #ECEAF3;
-    --muted: rgba(236, 234, 243, 0.58);
+    --accent: rgb(25, 216, 230);      /* electric cyan — the app's primary */
+    --blue: rgb(38, 140, 255);        /* glow gradient bridge */
+    --violet: rgb(123, 69, 246);     /* ambient light only */
+    --deep: rgb(11, 13, 34);          /* midnight navy surface */
+    --ink: #F4F7FF;
+    --muted: rgba(244, 247, 255, 0.58);
   }
   html, body {
     margin: 0; width: 100%; height: 100%; overflow: hidden;
-    background: rgb(22, 23, 43); background: var(--deep);
+    background: rgb(11, 13, 34); background: var(--deep);
     font-family: -apple-system, 'SF Pro Text', Roboto, 'Segoe UI', sans-serif;
     -webkit-font-smoothing: antialiased;
-    color: #ECEAF3; color: var(--ink);
+    color: #F4F7FF; color: var(--ink);
     cursor: none;
   }
   cast-media-player {
-    --theme-hue: 28;
+    --theme-hue: 187;
     --progress-color: var(--accent);
     --splash-image: none;
     /* Brands the stock surfaces we don't draw ourselves. */
@@ -41,7 +42,7 @@
     width: 100%; height: 100%; background: #000; display: none;
   }
 
-  /* "Projector in a dark room": warm amber light spilling onto deep indigo,
+  /* The mark's own light in a dark room: cyan spilling onto midnight navy,
      the same ambience as the app's launch screen and the browser receivers. */
   .screen {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
@@ -50,26 +51,26 @@
     padding: 5vh 6vw;                 /* title-safe: TVs crop the edges */
     text-align: center;
     background:
-      radial-gradient(120vw 90vh at 18% -12%, rgba(245,158,66,0.16), transparent 55%),
-      radial-gradient(90vw 70vh at 88% 108%, rgba(158,120,240,0.12), transparent 60%),
-      rgb(22, 23, 43);
+      radial-gradient(120vw 90vh at 18% -12%, rgba(25,216,230,0.16), transparent 55%),
+      radial-gradient(90vw 70vh at 88% 108%, rgba(123,69,246,0.12), transparent 60%),
+      rgb(11, 13, 34);
   }
   #idle { display: flex; }
 
-  /* The app mark. The PNG is a square with the indigo baked in, so the corner
+  /* The app mark. The PNG is a square with the navy baked in, so the corner
      radius is ours (same treatment as the browser receivers) — it reads as the
-     app icon rather than a pasted tile. The amber shadow lifts it off the
+     app icon rather than a pasted tile. The cyan shadow lifts it off the
      background the way the icon sits on a home screen. */
   .mark {
     width: 15vh; height: 15vh; display: block;
     border-radius: 22%;
-    box-shadow: 0 2.4vh 7vh rgba(245,158,66,0.34);
+    box-shadow: 0 2.4vh 7vh rgba(25,216,230,0.34);
   }
   .wordmark {
     margin: 3.4vh 0 0;
     font-size: 1.9vh; font-weight: 700;
     letter-spacing: 0.42em; text-transform: uppercase;
-    color: rgb(245, 158, 66); color: var(--accent);
+    color: rgb(25, 216, 230); color: var(--accent);
   }
   .headline { margin: 1.8vh 0 0; font-size: 4.4vh; font-weight: 600; letter-spacing: 0.005em; }
   .hint { margin: 1.6vh 0 0; font-size: 2.4vh; font-weight: 500; color: var(--muted); }
@@ -105,9 +106,9 @@
 
   #error .mark-error {
     width: 12vh; height: 12vh; border-radius: 26%;
-    background: linear-gradient(135deg, rgb(232, 94, 82), rgb(200, 62, 62));
+    background: linear-gradient(135deg, rgb(240, 93, 116), rgb(201, 59, 87));
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 2.2vh 7vh rgba(232,94,82,0.38);
+    box-shadow: 0 2.2vh 7vh rgba(240,93,116,0.38);
   }
   #error .mark-error svg { width: 52%; height: 52%; }
   #error .headline { font-size: 3.8vh; font-weight: 700; max-width: 78vw; }
@@ -116,19 +117,19 @@
     font-size: 2.4vh; font-weight: 500; color: var(--muted);
     max-width: 62vw; line-height: 1.45;
   }
-  /* A failure tints the ambience coral instead of amber. */
+  /* A failure tints the ambience red instead of cyan. */
   #error {
     background:
-      radial-gradient(120vw 90vh at 18% -12%, rgba(232,94,82,0.18), transparent 55%),
-      radial-gradient(90vw 70vh at 88% 108%, rgba(158,120,240,0.10), transparent 60%),
-      rgb(22, 23, 43);
+      radial-gradient(120vw 90vh at 18% -12%, rgba(240,93,116,0.18), transparent 55%),
+      radial-gradient(90vw 70vh at 88% 108%, rgba(123,69,246,0.10), transparent 60%),
+      rgb(11, 13, 34);
   }
 
   .spinner {
     width: 4.6vh; height: 4.6vh; margin: 3.4vh 0 0;
     border-radius: 50%;
-    border: 0.55vh solid rgba(236,234,243,0.16);
-    border-top-color: rgb(245, 158, 66);
+    border: 0.55vh solid rgba(244,247,255,0.16);
+    border-top-color: rgb(25, 216, 230);
     border-top-color: var(--accent);
     -webkit-animation: spin 0.9s linear infinite;
     animation: spin 0.9s linear infinite;

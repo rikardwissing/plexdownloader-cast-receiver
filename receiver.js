@@ -101,7 +101,7 @@ document.addEventListener('DOMContentLoaded', () => {
   Screens.show('idle');
   if (PREVIEW === 'loading') {
     Screens.loading('Bluey — S03E01 — Perfect',
-                    'https://placehold.co/400x400/1a1b2e/f59e42?text=B');
+                    'https://placehold.co/400x400/0b0d22/19d8e6?text=B');
   } else if (PREVIEW === 'error') {
     Screens.error("Can't play this video",
                   "This device can't decode the video or audio format.");
