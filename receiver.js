@@ -152,7 +152,8 @@ class MseEngine {
   onSourceOpen() {
     this.mp4.onError = (e) => slog('engine mp4box error: ' + e);
     this.mp4.onReady = (info) => this.onReady(info);
-    this.mp4.onSegment = (id, user, buffer) => this.onSegment(id, buffer);
+    this.mp4.onSegment = (id, user, buffer, sampleNumber) =>
+      this.onSegment(id, buffer, sampleNumber);
     this.pump(0);
   }
 
@@ -198,10 +199,31 @@ class MseEngine {
     this.reposition(0);
   }
 
-  onSegment(id, buffer) {
+  onSegment(id, buffer, sampleNumber) {
     if (id === this.videoTrackId) this.enqueue('video', buffer);
     else if (id === this.audioTrackId) this.enqueue('audio', buffer);
     // other audio tracks: demuxed and dropped
+    //
+    // Then hand the samples back. mp4box keeps every sample's payload on the
+    // sample object until releaseUsedSamples is called, and the segmentation
+    // path does NOT do it for you — the finished segment arrives and the source
+    // samples stay put. Nothing here ever asked, so a whole film accumulated in
+    // memory: measured with scripts/mp4box-retention.js in the app repo,
+    // 304,176 of 304,176 samples still holding data after 31.8 MB, 0.93x of
+    // everything streamed. On a 1.1 GB file that is ~1 GB resident, which a
+    // Chromecast does not have.
+    //
+    // EVERY fragmented track, not just the two being played: unselected audio is
+    // fragmented as well (that is what makes an audio switch cheap) and its
+    // samples are retained exactly the same way.
+    //
+    // sampleNumber is what the segment consumed, so it is the correct bound —
+    // release only against samples something was BUILT from. Two neater-looking
+    // bounds are both wrong and were measured to be: `alreadyRead > 0` races
+    // ahead of the extraction cursor on a track with many small samples and
+    // silently truncates it mid-file, and a high-water mark from the delivery
+    // callback is early for any engine that pools before building.
+    try { this.mp4.releaseUsedSamples(id, sampleNumber); } catch (e) {}
   }
 
   enqueue(kind, buffer) {
