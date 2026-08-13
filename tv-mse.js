@@ -111,7 +111,17 @@
   MseEngine.prototype.minimalEntry=function(entry,kind){
     var raw=this.serializeEntry(entry);
     var fixed=(kind==='video')?86:36;             // 8 hdr + 78 visual / 28 audio
-    var keep={avcC:1,hvcC:1,esds:1,colr:1,pasp:1,btrt:1};
+    /* The codec's OWN configuration box has to survive, or the decoder gets a
+       sample entry it cannot configure from and the media element answers
+       MEDIA_SRC_NOT_SUPPORTED — after `ready`, with the engine looking healthy.
+       Field-caught: a FLAC track reached "engine ready: 7 audio, playing #0" and
+       then error 104, because `dfLa` was not on this list. esds (AAC) and
+       avcC/hvcC were, which is why the old sender rule of "every track must be
+       AAC" hid the gap for so long: nothing else ever reached here.
+       dfLa=FLAC, dac3=AC-3, dec3=E-AC-3, dOps=Opus, wave/chan=legacy audio
+       layouts some muxers still emit. */
+    var keep={avcC:1,hvcC:1,esds:1,colr:1,pasp:1,btrt:1,
+              dfLa:1,dac3:1,dec3:1,dOps:1,wave:1,chan:1};
     var out=[raw.subarray(0,fixed)], p=fixed;
     while(p+8<=raw.length){
       var dv=new DataView(raw.buffer,raw.byteOffset+p);
