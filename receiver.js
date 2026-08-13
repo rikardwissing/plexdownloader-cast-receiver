@@ -134,251 +134,66 @@ function errorMessage(code) {
 }
 
 // ---------------------------------------------------------------- MSE engine
-
-// One engine per load. Demuxes the served MP4 with mp4box.js and feeds two
-// SourceBuffers. Every audio track is fragmented from the start (segments for
-// unselected tracks are dropped as they arrive — demux cost only), so a
-// switch needs no re-parse: flush the audio buffer, append the other track's
-// init segment, and re-extract from the current position.
-class MseEngine {
-  constructor(url, audioTypeIndex) {
-    this.url = url;
-    this.wantAudioIndex = audioTypeIndex || 0;
-    this.mediaSource = new MediaSource();
-    this.objectUrl = URL.createObjectURL(this.mediaSource);
-    this.mp4 = MP4Box.createFile();
-    this.buffers = {};        // 'video' | 'audio' → SourceBuffer
-    this.queues = { video: [], audio: [] };
-    this.initSegs = {};       // mp4 track id → init segment ArrayBuffer
-    this.audioTracks = [];    // mp4box audio track infos, file order
-    this.videoTrackId = null;
-    this.audioTrackId = null;
-    this.fetchOffset = 0;
-    this.fetchGen = 0;        // bumped to cancel an in-flight pump
-    this.dead = false;
-    this.mediaSource.addEventListener('sourceopen', () => this.onSourceOpen());
-  }
-
-  onSourceOpen() {
-    this.mp4.onError = (e) => slog('engine mp4box error: ' + e);
-    this.mp4.onReady = (info) => this.onReady(info);
-    this.mp4.onSegment = (id, user, buffer, sampleNumber) =>
-      this.onSegment(id, buffer, sampleNumber);
-    this.pump(0);
-  }
-
-  onReady(info) {
-    const video = info.videoTracks && info.videoTracks[0];
-    this.audioTracks = info.audioTracks || [];
-    const audio = this.audioTracks[this.wantAudioIndex] || this.audioTracks[0];
-    if (!video || !audio) { slog('engine: missing tracks'); return; }
-    this.videoTrackId = video.id;
-    this.audioTrackId = audio.id;
-    if (info.duration && info.timescale) {
-      try { this.mediaSource.duration = info.duration / info.timescale; } catch (e) {}
-    }
-    const vMime = 'video/mp4; codecs="' + video.codec + '"';
-    this.audioMimeFor = (t) => 'audio/mp4; codecs="' + t.codec + '"';
-    try {
-      this.buffers.video = this.mediaSource.addSourceBuffer(vMime);
-      this.buffers.audio = this.mediaSource.addSourceBuffer(this.audioMimeFor(audio));
-    } catch (e) {
-      slog('engine addSourceBuffer failed: ' + e + ' ' + vMime);
-      Screens.error("Can't play this video",
-                    "This device can't decode the video or audio format.");
-      return;
-    }
-    for (const kind of ['video', 'audio']) {
-      this.buffers[kind].addEventListener('updateend', () => this.drain(kind));
-      this.buffers[kind].addEventListener('error', () => slog('engine ' + kind + ' buffer error'));
-    }
-    // Fragment video + EVERY audio track; unselected audio is dropped in
-    // onSegment, so a later switch only needs a refill from the live position.
-    this.mp4.setSegmentOptions(video.id, null, { nbSamples: 100 });
-    for (const t of this.audioTracks) this.mp4.setSegmentOptions(t.id, null, { nbSamples: 100 });
-    for (const seg of this.mp4.initializeSegmentation()) this.initSegs[seg.id] = seg.buffer;
-    this.enqueue('video', this.initSegs[video.id]);
-    this.enqueue('audio', this.initSegs[audio.id]);
-    this.mp4.start();
-    slog('engine ready: video ' + video.codec + ', audio [' +
-         this.audioTracks.map((t) => t.codec + ':' + (t.language || '?')).join(', ') +
-         '] playing #' + this.wantAudioIndex);
-    // A moov-at-end file (no faststart) means the whole file streamed past
-    // before the index was known — nothing was extracted. Either way, sample
-    // extraction starts by seeking the demux back to the first frame's bytes.
-    this.reposition(0);
-  }
-
-  onSegment(id, buffer, sampleNumber) {
-    if (id === this.videoTrackId) this.enqueue('video', buffer);
-    else if (id === this.audioTrackId) this.enqueue('audio', buffer);
-    // other audio tracks: demuxed and dropped
-    //
-    // Then hand the samples back. mp4box keeps every sample's payload on the
-    // sample object until releaseUsedSamples is called, and the segmentation
-    // path does NOT do it for you — the finished segment arrives and the source
-    // samples stay put. Nothing here ever asked, so a whole film accumulated in
-    // memory: measured with scripts/mp4box-retention.js in the app repo,
-    // 304,176 of 304,176 samples still holding data after 31.8 MB, 0.93x of
-    // everything streamed. On a 1.1 GB file that is ~1 GB resident, which a
-    // Chromecast does not have.
-    //
-    // EVERY fragmented track, not just the two being played: unselected audio is
-    // fragmented as well (that is what makes an audio switch cheap) and its
-    // samples are retained exactly the same way.
-    //
-    // sampleNumber is what the segment consumed, so it is the correct bound —
-    // release only against samples something was BUILT from. Two neater-looking
-    // bounds are both wrong and were measured to be: `alreadyRead > 0` races
-    // ahead of the extraction cursor on a track with many small samples and
-    // silently truncates it mid-file, and a high-water mark from the delivery
-    // callback is early for any engine that pools before building.
-    try { this.mp4.releaseUsedSamples(id, sampleNumber); } catch (e) {}
-  }
-
-  enqueue(kind, buffer) {
-    if (!buffer) return;
-    this.queues[kind].push(buffer);
-    this.drain(kind);
-  }
-
-  drain(kind) {
-    const sb = this.buffers[kind];
-    if (this.dead || !sb || sb.updating || this.mediaSource.readyState !== 'open') return;
-    const next = this.queues[kind].shift();
-    if (!next) return;
-    try {
-      sb.appendBuffer(next);
-    } catch (e) {
-      if (e.name === 'QuotaExceededError') {
-        this.queues[kind].unshift(next);
-        this.evict(kind);
-      } else {
-        slog('engine append ' + kind + ' failed: ' + e);
-      }
-    }
-  }
-
-  evict(kind) {
-    const sb = this.buffers[kind];
-    const now = playerManager.getCurrentTimeSec() || 0;
-    const keepFrom = Math.max(0, now - 20);
-    try {
-      if (!sb.updating && sb.buffered.length && sb.buffered.start(0) < keepFrom - 1) {
-        sb.remove(0, keepFrom);   // updateend re-drains the queue
-      }
-    } catch (e) { slog('engine evict failed: ' + e); }
-  }
-
-  bufferedAheadSec() {
-    const sb = this.buffers.video;
-    if (!sb || !sb.buffered.length) return 0;
-    const now = playerManager.getCurrentTimeSec() || 0;
-    const end = sb.buffered.end(sb.buffered.length - 1);
-    return Math.max(0, end - now);
-  }
-
-  // Sequential byte pump: fetch 2 MB ranges, hand them to mp4box (which
-  // returns the next offset it wants), stall while >90s is buffered ahead,
-  // trim behind playback as we go.
-  async pump(offset) {
-    const gen = ++this.fetchGen;
-    const CHUNK = 2 * 1024 * 1024;
-    this.fetchOffset = offset;
-    while (!this.dead && gen === this.fetchGen) {
-      if (this.bufferedAheadSec() > 90) {
-        await new Promise((r) => setTimeout(r, 500));
-        this.evict('video'); this.evict('audio');
-        continue;
-      }
-      let buf;
-      try {
-        const resp = await fetch(this.url, { headers: { Range: 'bytes=' + this.fetchOffset + '-' + (this.fetchOffset + CHUNK - 1) } });
-        if (resp.status === 416) {   // ranged past EOF — the file is done
-          if (gen === this.fetchGen) { this.mp4.flush(); this.endStreamWhenDrained(gen); }
-          return;
-        }
-        if (!resp.ok) { slog('engine fetch HTTP ' + resp.status + ' @' + this.fetchOffset); return; }
-        buf = await resp.arrayBuffer();
-      } catch (e) { slog('engine fetch failed @' + this.fetchOffset + ': ' + e); return; }
-      if (this.dead || gen !== this.fetchGen) return;
-      if (!buf.byteLength) { this.mp4.flush(); this.endStreamWhenDrained(gen); return; }
-      buf.fileStart = this.fetchOffset;
-      const next = this.mp4.appendBuffer(buf);
-      // appendBuffer can fire onReady, whose reposition() supersedes THIS
-      // pump — a moov-at-end file EOFs right here, and declaring end-of-
-      // stream from the stale pump truncated playback to seconds.
-      if (this.dead || gen !== this.fetchGen) return;
-      const done = buf.byteLength < CHUNK;   // short read = EOF
-      if (done) { this.mp4.flush(); this.endStreamWhenDrained(gen); return; }
-      this.fetchOffset = (typeof next === 'number') ? next : this.fetchOffset + buf.byteLength;
-    }
-  }
-
-  endStreamWhenDrained(gen) {
-    const tryEnd = () => {
-      // A reposition/seek since this EOF means more data is coming — bail.
-      if (this.dead || gen !== this.fetchGen || this.mediaSource.readyState !== 'open') return;
-      if (this.queues.video.length || this.queues.audio.length ||
-          this.buffers.video.updating || this.buffers.audio.updating) {
-        setTimeout(tryEnd, 200);
-        return;
-      }
-      try { this.mediaSource.endOfStream(); } catch (e) {}
-    };
-    tryEnd();
-  }
-
-  // Reposition the demux (post-index start, sender seek, or audio-switch
-  // refill). mp4box maps the time to the byte offset of the previous
-  // keyframe; already-queued segments stay queued — re-extracted video just
-  // overwrites itself in MSE, and clearing here would eat a freshly queued
-  // init segment.
-  reposition(timeSec) {
-    let seek;
-    try { seek = this.mp4.seek(Math.max(0, timeSec), true); }
-    catch (e) { slog('engine seek failed: ' + e); return; }
-    this.pump(seek.offset);
-  }
-
-  // The whole point of the engine: switch audio without touching video.
-  setAudioTrack(index) {
-    const track = this.audioTracks[index];
-    if (!track || track.id === this.audioTrackId) return;
-    const sb = this.buffers.audio;
-    if (!sb) return;
-    this.audioTrackId = track.id;
-    this.wantAudioIndex = index;
-    const swap = () => {
-      if (sb.updating) { setTimeout(swap, 50); return; }
-      try {
-        if (sb.buffered.length) sb.remove(0, this.mediaSource.duration || 1e9);
-      } catch (e) {}
-      const append = () => {
-        if (sb.updating) { setTimeout(append, 50); return; }
-        try { if (sb.changeType) sb.changeType(this.audioMimeFor(track)); } catch (e) {}
-        this.queues.audio = [this.initSegs[track.id]];
-        this.drain('audio');
-        this.reposition((playerManager.getCurrentTimeSec() || 0) - 0.5);
-        slog('engine audio → #' + index + ' (' + (track.language || '?') + ')');
-      };
-      append();
-    };
-    swap();
-  }
-
-  destroy() {
-    this.dead = true;
-    this.fetchGen++;
-    try { this.mp4.stop(); } catch (e) {}
-    URL.revokeObjectURL(this.objectUrl);
-  }
-}
+//
+// The engine is tv-mse.js, shared verbatim with the WebRTC and LAN receivers.
+// There used to be a second implementation here — ~410 lines, its own bugs, its
+// own fixes — and keeping two meant every engine improvement had to be reasoned
+// about twice and usually reached only one of them. It is also LIGHTER on this
+// device: it extracts video plus the SELECTED audio track, where the old one
+// fragmented all of them up front (eight tracks on a 7-audio file) to make an
+// in-place switch possible.
+//
+// The trade that buys: switching audio reloads at the live position instead of
+// refilling in place. The in-place refill was tried on the shared engine and
+// abandoned, and on this hardware its advantage was theoretical anyway — a
+// field log showed an in-place switch followed by ~75 s of buffering and then a
+// full reload regardless.
+//
+// tv-mse.js wants three things from its host, so give them to it before any
+// engine exists: somewhere to trace, a codec/error surface, and a media element.
+// It asks remarkably little of that element — currentTime and error — because
+// every buffered range it reasons about comes from the SourceBuffers, so
+// playerManager stands in for it faithfully.
+window.tvReport = slog;
+window.tvHelpers = {
+  canPlay: (kind, codec) => mseSupport(kind + '/mp4; codecs="' + codec + '"'),
+  codecName: (c) => String(c || ''),
+  playbackError: (msg) => Screens.error("Can't play this video", msg),
+};
+window.tvSetMediaElement({
+  get currentTime() { return playerManager.getCurrentTimeSec() || 0; },
+  error: null,
+});
 
 let engine = null;
+// The load as the SENDER sent it — the interceptor rewrites contentUrl to a blob,
+// so the original has to be kept to re-issue it.
+let lastLoad = null;
 
 function teardownEngine() {
-  if (engine) { engine.destroy(); engine = null; }
+  if (engine) { try { engine.destroy(); } catch (e) {} engine = null; }
+}
+
+// Re-issue the current media at the live position. Used for an audio switch
+// (the shared engine reloads rather than refilling in place) and as the escape
+// hatch when the engine fails — dropping `mseEngine` falls back to CAF's own
+// pipeline instead of leaving a dead screen, which the old engine had no answer
+// for.
+function reissue({ audioTypeIndex, withEngine = true }) {
+  if (!lastLoad) return;
+  const at = playerManager.getCurrentTimeSec() || 0;
+  const custom = Object.assign({}, lastLoad.custom);
+  if (typeof audioTypeIndex === 'number') custom.audioTypeIndex = audioTypeIndex;
+  if (!withEngine) delete custom.mseEngine;
+  const media = Object.assign({}, lastLoad.media, {
+    contentUrl: lastLoad.url, contentId: lastLoad.url, customData: custom,
+  });
+  const request = new cast.framework.messages.LoadRequestData();
+  request.media = media;
+  request.currentTime = at;
+  slog('reissue at ' + Math.round(at) + 's audio#' +
+       (custom.audioTypeIndex || 0) + (withEngine ? '' : ' (no engine)'));
+  playerManager.load(request);
 }
 
 // ---------------------------------------------------------------- CAF wiring
@@ -400,7 +215,16 @@ if (!PREVIEW) {
     Screens.loading(meta.title || '', poster);
     if (custom.mseEngine && window.MediaSource && typeof MP4Box !== 'undefined') {
       const url = media.contentUrl || media.contentId;
-      engine = new MseEngine(url, custom.audioTypeIndex || 0);
+      lastLoad = { url, media: Object.assign({}, media), custom };
+      // null fetcher = plain HTTP Range, which is what this receiver has always
+      // used; the WebRTC receiver injects a data-channel source instead.
+      engine = new window.MseEngine(url, custom.audioTypeIndex || 0, null);
+      engine.onAudioSwitch = (index) => reissue({ audioTypeIndex: index });
+      engine.onEngineFailed = (reason) => {
+        slog('engine failed, falling back to default playback: ' + reason);
+        teardownEngine();
+        reissue({ withEngine: false });
+      };
       media.contentUrl = engine.objectUrl;
       media.contentId = engine.objectUrl;
       media.contentType = 'video/mp4';
