@@ -26,6 +26,10 @@
      (tv-main.js), which parses everywhere and exports window.tvHelpers.
      Dereference at CALL time — this file executes before tv-main.js. */
   function playbackError(msg){ if(window.tvHelpers&&window.tvHelpers.playbackError){window.tvHelpers.playbackError(msg);} else {trace('fatal: '+msg);} }
+  /* Something went wrong that playback SURVIVED. Separate from playbackError,
+     which tears the session down — the viewer needs to be told a track could not
+     be decoded, and still be able to pick another one. */
+  function playbackNotice(msg){ if(window.tvHelpers&&window.tvHelpers.playbackNotice){window.tvHelpers.playbackNotice(msg);} else {trace('notice: '+msg);} }
   /* mp4box reports a track's codec as its ISO fourcc, and MSE does not always
      spell it the same way. FLAC's box type is `fLaC`; MediaSource wants `flac`,
      and isTypeSupported is case-sensitive, so asking it about `fLaC` gets a flat
@@ -228,6 +232,11 @@
       trace('engine audio #'+this.wantAudioIndex+' ('+codecName(audio.codec)+
             ') is undecodable here — falling forward to #'+usable+
             ' ('+codecName(this.audioTracks[usable].codec)+')');
+      /* Say so. Falling forward silently trades one bad outcome for a
+         confusing one: the wrong language plays and nothing explains why. */
+      playbackNotice('This browser can’t decode '+codecName(audio.codec)+
+                     ' — playing '+codecName(this.audioTracks[usable].codec)+
+                     ' instead. Pick another track to change it.');
       this.wantAudioIndex=usable;
       audio=this.audioTracks[usable];
     }

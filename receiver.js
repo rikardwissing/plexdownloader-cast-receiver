@@ -165,6 +165,10 @@ window.tvHelpers = {
   canPlay: (kind, codec) => mseSupport(kind + '/mp4; codecs="' + codec + '"'),
   codecName: (c) => String(c || ''),
   playbackError: (msg) => Screens.error("Can't play this video", msg),
+  // Survivable trouble. NOT Screens.error, which replaces playback with an error
+  // card: the point is that the viewer keeps watching and can still pick a track
+  // that works. It rides slog into the sender's diagnostics instead.
+  playbackNotice: (msg) => slog('notice: ' + msg),
 };
 window.tvSetMediaElement({
   get currentTime() { return playerManager.getCurrentTimeSec() || 0; },
