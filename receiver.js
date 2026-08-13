@@ -39,6 +39,12 @@ function capabilities() {
     audioAAC: mseSupport('audio/mp4; codecs="mp4a.40.2"'),
     audioAC3: mseSupport('audio/mp4; codecs="ac-3"'),
     audioEC3: mseSupport('audio/mp4; codecs="ec-3"'),
+    // Beyond AAC and Dolby: the sender used to demand EVERY audio track be AAC
+    // before it would enable the engine, so a file carrying one FLAC track lost
+    // track switching entirely — for nothing, since FLAC has no passthrough to
+    // protect. It asks per codec now, and these are the answers it needs.
+    audioFLAC: mseSupport('audio/mp4; codecs="flac"'),
+    audioOpus: mseSupport('audio/mp4; codecs="opus"'),
     // Can this device switch MUXED audio natively, with no engine at all?
     // If it can, the whole MseEngine here is unnecessary: its only reason to
     // exist is audio switching on multi-audio direct MP4s (the sender gates it
