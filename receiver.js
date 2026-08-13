@@ -39,6 +39,16 @@ function capabilities() {
     audioAAC: mseSupport('audio/mp4; codecs="mp4a.40.2"'),
     audioAC3: mseSupport('audio/mp4; codecs="ac-3"'),
     audioEC3: mseSupport('audio/mp4; codecs="ec-3"'),
+    // Can this device switch MUXED audio natively, with no engine at all?
+    // If it can, the whole MseEngine here is unnecessary: its only reason to
+    // exist is audio switching on multi-audio direct MP4s (the sender gates it
+    // on audioTracks.count >= 2 and nothing else), and a one-line
+    // `audioTracks[i].enabled = true` would replace ~410 lines of demuxing on
+    // the weakest device we cast to.
+    // Chrome has never shipped AudioTrackList by default, and this box reports
+    // Chrome 92 — so the honest expectation is false. Measured beats expected:
+    // it rides the pong into the sender's diagnostics log either way.
+    audioTracks: !!document.createElement('video').audioTracks,
     userAgent: navigator.userAgent,
   };
 }
