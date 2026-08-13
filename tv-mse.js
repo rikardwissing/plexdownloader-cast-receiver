@@ -220,35 +220,32 @@
        and then nothing, on a file whose FLAC track plays fine.
        So fall forward to the first track this browser CAN take. Only when none
        of them work is there nothing left to say. */
-    if(!canPlay('audio',mimeCodec(audio.codec))){
-      var usable=-1;
-      for(var ai=0;ai<this.audioTracks.length;ai++){
-        if(canPlay('audio',mimeCodec(this.audioTracks[ai].codec))){usable=ai;break;}
-      }
-      if(usable<0){
-        playbackError('This browser can’t decode any of this video’s audio.');
-        return;
-      }
+    /* An undecodable AUDIO track plays SILENT — it must not end the session, and
+       it must not quietly pick a different track either.
+       Ending it was the first behaviour: playbackError killed playback, and
+       since switching is driven from this same engine the viewer was stranded on
+       the one track that did not work. Falling forward to a track that did was
+       the second, and it overrides the very thing that was asked for — you
+       select Swedish, you get English, and nothing says why.
+       So: keep the video, drop the audio, and say what happened. The choice
+       stands, playback continues, and another track is still one pick away. */
+    var silent=!canPlay('audio',mimeCodec(audio.codec));
+    if(silent){
       trace('engine audio #'+this.wantAudioIndex+' ('+codecName(audio.codec)+
-            ') is undecodable here — falling forward to #'+usable+
-            ' ('+codecName(this.audioTracks[usable].codec)+')');
-      /* Say so. Falling forward silently trades one bad outcome for a
-         confusing one: the wrong language plays and nothing explains why. */
+            ') is undecodable here — playing without sound');
       playbackNotice('This browser can’t decode '+codecName(audio.codec)+
-                     ' — playing '+codecName(this.audioTracks[usable].codec)+
-                     ' instead. Pick another track to change it.');
-      this.wantAudioIndex=usable;
-      audio=this.audioTracks[usable];
+                     ' — playing without sound. Pick another track for audio.');
     }
-    this.videoTrackId=video.id; this.audioTrackId=audio.id;
+    this.videoTrackId=video.id; this.audioTrackId=silent?null:audio.id;
     if(info.duration&&info.timescale){try{this.mediaSource.duration=info.duration/info.timescale}catch(e){}}
     var self=this;
     try{
       this.buffers.video=this.mediaSource.addSourceBuffer('video/mp4; codecs="'+mimeCodec(video.codec)+'"');
-      this.buffers.audio=this.mediaSource.addSourceBuffer('audio/mp4; codecs="'+mimeCodec(audio.codec)+'"');
+      if(!silent) this.buffers.audio=this.mediaSource.addSourceBuffer('audio/mp4; codecs="'+mimeCodec(audio.codec)+'"');
     }catch(e){playbackError('This browser can’t decode this format.');return;}
     ['video','audio'].forEach(function(kind){
-      self.buffers[kind].addEventListener('updateend',function(){self.drain(kind)});
+      /* Silent playback has no audio buffer to wire up. */
+      if(self.buffers[kind])self.buffers[kind].addEventListener('updateend',function(){self.drain(kind)});
     });
     this.seq={video:0,audio:0};
     /* Phase costs, reported in one line below. onReady sits inside
@@ -257,7 +254,7 @@
     var tInit=nowMs();
     try{
       this.enqueue('video',this.buildInit(video.id,'video'));
-      this.enqueue('audio',this.buildInit(audio.id,'audio'));
+      if(!silent) this.enqueue('audio',this.buildInit(audio.id,'audio'));
     }catch(eInit){playbackError('Could not prepare this video for streaming.');trace('engine init build failed: '+eInit);return;}
     var tExtract=nowMs();
     this.resetExtraction();
@@ -295,10 +292,10 @@
     this.pending={video:[],audio:[]};
     if(this.extractionActive){
       try{this.mp4.unsetExtractionOptions(this.videoTrackId)}catch(e){}
-      try{this.mp4.unsetExtractionOptions(this.audioTrackId)}catch(e2){}
+      if(this.audioTrackId!=null){try{this.mp4.unsetExtractionOptions(this.audioTrackId)}catch(e2){}}
     }
     this.mp4.setExtractionOptions(this.videoTrackId,'video',{nbSamples:100});
-    this.mp4.setExtractionOptions(this.audioTrackId,'audio',{nbSamples:100});
+    if(this.audioTrackId!=null)this.mp4.setExtractionOptions(this.audioTrackId,'audio',{nbSamples:100});
     this.extractionActive=true;
   };
   /* Fragments are cut at video keyframes, exactly like ffmpeg's
@@ -367,7 +364,8 @@
     }
   };
   MseEngine.prototype.evict=function(kind){
-    var sb=this.buffers[kind], now=v.currentTime||0, keepFrom=Math.max(0,now-20);
+    var sb=this.buffers[kind]; if(!sb) return;   /* silent playback has no audio buffer */
+    var now=v.currentTime||0, keepFrom=Math.max(0,now-20);
     try{if(!sb.updating&&sb.buffered.length&&sb.buffered.start(0)<keepFrom-1)sb.remove(0,keepFrom)}catch(e){}
   };
   MseEngine.prototype.aheadOf=function(kind){
@@ -378,7 +376,10 @@
     }
     return 0;
   };
-  MseEngine.prototype.bufferedAheadSec=function(){return Math.min(this.aheadOf('video'),this.aheadOf('audio'))};
+  MseEngine.prototype.bufferedAheadSec=function(){
+    if(!this.buffers.audio) return this.aheadOf('video');
+    return Math.min(this.aheadOf('video'),this.aheadOf('audio'));
+  };
   MseEngine.prototype.finish=function(gen){
     trace('engine finish gen='+gen+' @'+this.fetchOffset);
     this.mp4.flush();
@@ -661,7 +662,9 @@
     var self=this;
     var tryEnd=function(){
       if(self.dead||gen!==self.fetchGen||self.mediaSource.readyState!=='open')return;
-      if(self.queues.video.length||self.queues.audio.length||self.buffers.video.updating||self.buffers.audio.updating){setTimeout(tryEnd,200);return;}
+      if(self.queues.video.length||self.queues.audio.length||
+         (self.buffers.video&&self.buffers.video.updating)||
+         (self.buffers.audio&&self.buffers.audio.updating)){setTimeout(tryEnd,200);return;}
       try{self.mediaSource.endOfStream()}catch(e){}
     };
     tryEnd();
