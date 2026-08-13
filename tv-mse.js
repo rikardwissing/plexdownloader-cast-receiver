@@ -274,6 +274,11 @@
           ' resetExtraction='+ms(tStart-tExtract)+
           ' mp4.start='+ms(tDone-tStart)+counts);
     trace('engine ready: video '+video.codec+', '+this.audioTracks.length+' audio, playing #'+this.wantAudioIndex);
+    /* Take back any previous verdict, unless this load has its own. A track
+       switch is decided HERE, not by the sender, so nothing else was in a
+       position to retract "can't play this" once a working track was picked —
+       the warning simply sat there over playing video. */
+    if(!silent)playbackNotice('');
     /* Where the viewer actually wants to be, not byte zero. The page sets
        v.currentTime from the load's startTime before the engine is ready, so
        repositioning to 0 aimed at the head of the file, issued a request, and was
