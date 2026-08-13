@@ -26,6 +26,21 @@
      (tv-main.js), which parses everywhere and exports window.tvHelpers.
      Dereference at CALL time — this file executes before tv-main.js. */
   function playbackError(msg){ if(window.tvHelpers&&window.tvHelpers.playbackError){window.tvHelpers.playbackError(msg);} else {trace('fatal: '+msg);} }
+  /* mp4box reports a track's codec as its ISO fourcc, and MSE does not always
+     spell it the same way. FLAC's box type is `fLaC`; MediaSource wants `flac`,
+     and isTypeSupported is case-sensitive, so asking it about `fLaC` gets a flat
+     no for a codec the device plays perfectly well. Field-caught: a file with
+     AC-3 + FLAC engaged the engine (the SENDER gates on ffprobe's `flac`, which
+     matches) and then the engine refused its own audio, while the same FLAC as a
+     single track played fine because one track never engages the engine at all.
+     Opus has the same shape (`Opus`). Everything else passes through untouched —
+     a blanket lowercase would corrupt `hvc1.2.4.L120.90`, where the capital L is
+     load-bearing. */
+  var MIME_CODEC={'flac':'flac','opus':'opus'};
+  function mimeCodec(c){
+    var key=String(c||'').toLowerCase();
+    return Object.prototype.hasOwnProperty.call(MIME_CODEC,key)?MIME_CODEC[key]:c;
+  }
   function canPlay(kind,codec){ return window.tvHelpers&&window.tvHelpers.canPlay?window.tvHelpers.canPlay(kind,codec):true; }
   function codecName(c){ return window.tvHelpers&&window.tvHelpers.codecName?window.tvHelpers.codecName(c):String(c||''); }
   function MseEngine(path,audioTypeIndex,fetcher){
@@ -183,14 +198,14 @@
     this.audioTracks=info.audioTracks||[];
     var audio=this.audioTracks[this.wantAudioIndex]||this.audioTracks[0];
     if(!video||!audio){playbackError('This video is missing a track the player needs.');return;}
-    if(!canPlay('video',video.codec)){playbackError('This browser can’t decode the video: '+codecName(video.codec)+'.');return;}
-    if(!canPlay('audio',audio.codec)){playbackError('This browser can’t decode the audio: '+codecName(audio.codec)+'.');return;}
+    if(!canPlay('video',mimeCodec(video.codec))){playbackError('This browser can’t decode the video: '+codecName(video.codec)+'.');return;}
+    if(!canPlay('audio',mimeCodec(audio.codec))){playbackError('This browser can’t decode the audio: '+codecName(audio.codec)+'.');return;}
     this.videoTrackId=video.id; this.audioTrackId=audio.id;
     if(info.duration&&info.timescale){try{this.mediaSource.duration=info.duration/info.timescale}catch(e){}}
     var self=this;
     try{
-      this.buffers.video=this.mediaSource.addSourceBuffer('video/mp4; codecs="'+video.codec+'"');
-      this.buffers.audio=this.mediaSource.addSourceBuffer('audio/mp4; codecs="'+audio.codec+'"');
+      this.buffers.video=this.mediaSource.addSourceBuffer('video/mp4; codecs="'+mimeCodec(video.codec)+'"');
+      this.buffers.audio=this.mediaSource.addSourceBuffer('audio/mp4; codecs="'+mimeCodec(audio.codec)+'"');
     }catch(e){playbackError('This browser can’t decode this format.');return;}
     ['video','audio'].forEach(function(kind){
       self.buffers[kind].addEventListener('updateend',function(){self.drain(kind)});
