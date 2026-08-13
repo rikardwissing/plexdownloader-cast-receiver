@@ -209,7 +209,28 @@
     var audio=this.audioTracks[this.wantAudioIndex]||this.audioTracks[0];
     if(!video||!audio){playbackError('This video is missing a track the player needs.');return;}
     if(!canPlay('video',mimeCodec(video.codec))){playbackError('This browser can’t decode the video: '+codecName(video.codec)+'.');return;}
-    if(!canPlay('audio',mimeCodec(audio.codec))){playbackError('This browser can’t decode the audio: '+codecName(audio.codec)+'.');return;}
+    /* An undecodable AUDIO track must not end the session. It used to:
+       playbackError killed playback outright, and since switching tracks is
+       driven from this same engine, the viewer was stranded on the one track
+       that did not work with no way to reach one that did — "can't decode AC-3"
+       and then nothing, on a file whose FLAC track plays fine.
+       So fall forward to the first track this browser CAN take. Only when none
+       of them work is there nothing left to say. */
+    if(!canPlay('audio',mimeCodec(audio.codec))){
+      var usable=-1;
+      for(var ai=0;ai<this.audioTracks.length;ai++){
+        if(canPlay('audio',mimeCodec(this.audioTracks[ai].codec))){usable=ai;break;}
+      }
+      if(usable<0){
+        playbackError('This browser can’t decode any of this video’s audio.');
+        return;
+      }
+      trace('engine audio #'+this.wantAudioIndex+' ('+codecName(audio.codec)+
+            ') is undecodable here — falling forward to #'+usable+
+            ' ('+codecName(this.audioTracks[usable].codec)+')');
+      this.wantAudioIndex=usable;
+      audio=this.audioTracks[usable];
+    }
     this.videoTrackId=video.id; this.audioTrackId=audio.id;
     if(info.duration&&info.timescale){try{this.mediaSource.duration=info.duration/info.timescale}catch(e){}}
     var self=this;
