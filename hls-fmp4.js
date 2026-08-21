@@ -20,10 +20,11 @@
 // the element clock equals the declared grid — the same clock the phone and
 // the browser receivers use, so positions survive handoffs.
 
-function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log) {
+function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.masterUrl = masterUrl;
   this.getTime = getTime || function () { return 0; };
   this.log = log || function () {};
+  this.startAt = startAt || 0;
   this.videoCodec = null;
   this.audioCodec = null;
   const codecs = String(streamCodecs || '').split(',');
@@ -47,7 +48,16 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log) {
   this.segments = [];           // [{uri, duration}]
   this.segIndex = 0;
   this.ended = false;           // playlist carried EXT-X-ENDLIST
-  this.timestampOffset = null;
+  // Plex declares every segment 10s but the real spans drift (measured ~12s
+  // on copy sessions) - a single global offset strands later segments minutes
+  // from their declared slot. Every segment is rebased individually: its own
+  // sidx says where its content really starts, and the difference to its
+  // declared slot rides each queued fragment as a per-append timestampOffset.
+  this.currentOffset = 0;
+  // The window of DECLARED time this generation has appended - the honest
+  // basis for "did the playhead leave what we have", immune to read-ahead.
+  this.windowLo = 0;
+  this.windowHi = 0;
   this.onEngineFailed = null;
   const self = this;
   this.mediaSource.addEventListener('sourceopen', function onOpen() {
@@ -125,10 +135,12 @@ HlsFmp4Engine.prototype.start_ = async function () {
     for (let i = 0; i < this.segments.length; i++) total += this.segments[i].duration;
     try { this.mediaSource.duration = total; } catch (e) {}
     // Start at the position CAF is about to play from, not at segment zero.
-    const at = this.getTime() || 0;
+    const at = Math.max(this.getTime() || 0, this.startAt);
     this.segIndex = Math.min(
       Math.max(0, Math.floor(at / 10) - this.mediaSequence),
       Math.max(0, this.segments.length - 1));
+    this.windowLo = (this.mediaSequence + this.segIndex) * 10;
+    this.windowHi = this.windowLo;
     this.setupMp4box_();
     this.pump_();
   } catch (e) { this.fatal_('start: ' + e); }
@@ -182,7 +194,7 @@ HlsFmp4Engine.prototype.setupMp4box_ = function () {
 };
 
 HlsFmp4Engine.prototype.enqueue_ = function (entry, buffer) {
-  entry.queue.push(buffer);
+  entry.queue.push({ buf: buffer, offset: this.currentOffset });
   this.drain_(entry);
 };
 
@@ -190,12 +202,13 @@ HlsFmp4Engine.prototype.drain_ = function (entry) {
   if (this.dead || entry.sb.updating || !entry.queue.length) return;
   if (this.mediaSource.readyState !== 'open') return;
   try {
-    // The anchor offset, applied lazily just before the append that needs it
-    // (setting timestampOffset while updating throws).
-    if (this.timestampOffset != null && entry.sb.timestampOffset !== this.timestampOffset) {
-      entry.sb.timestampOffset = this.timestampOffset;
+    // Each fragment carries the offset of the SEGMENT it came from, applied
+    // just before its append (setting timestampOffset while updating throws).
+    const item = entry.queue.shift();
+    if (entry.sb.timestampOffset !== item.offset) {
+      entry.sb.timestampOffset = item.offset;
     }
-    entry.sb.appendBuffer(entry.queue.shift());
+    entry.sb.appendBuffer(item.buf);
   } catch (e) {
     if (e && e.name === 'QuotaExceededError') {
       // Drop what playback has left behind, then retry on the next drain.
@@ -207,11 +220,9 @@ HlsFmp4Engine.prototype.drain_ = function (entry) {
   }
 };
 
-// The element clock must equal the playlist's declared grid. The segment's
-// own sidx carries the raw PTS (source + Plex's copyts lead); declared start
-// is segment-number * 10. Same per-session measurement discipline as the
-// subtitle clock on the browser receivers — no magic constants.
-HlsFmp4Engine.prototype.anchor_ = function (bytes, declaredStart) {
+// Where a segment's content REALLY starts, from its own sidx (raw PTS =
+// source + Plex's copyts lead). null when no sidx is found.
+HlsFmp4Engine.prototype.sidxStart_ = function (bytes) {
   try {
     const dv = new DataView(bytes);
     let off = 0;
@@ -225,17 +236,13 @@ HlsFmp4Engine.prototype.anchor_ = function (bytes, declaredStart) {
         const ept = version === 0
           ? dv.getUint32(off + 20)
           : dv.getUint32(off + 20) * 4294967296 + dv.getUint32(off + 24);
-        const raw = ept / timescale;
-        this.timestampOffset = declaredStart - raw;
-        this.log('hlsengine: anchor raw=' + raw.toFixed(2) +
-                 ' declared=' + declaredStart + ' offset=' + this.timestampOffset.toFixed(2));
-        return;
+        return ept / timescale;
       }
       if (!size) break;
       off += size;
     }
   } catch (e) {}
-  this.timestampOffset = 0;
+  return null;
 };
 
 HlsFmp4Engine.prototype.pump_ = async function () {
@@ -249,9 +256,10 @@ HlsFmp4Engine.prototype.pump_ = async function () {
     }
     const declaredStart = (this.mediaSequence + this.segIndex) * 10;
     const now = this.getTime() || 0;
-    // A sender seek moves the element far outside the fetch window — follow
-    // it. (In-window seeks just keep appending; MSE replaces overlaps.)
-    if (now > 1 && (now < declaredStart - 30 || now > declaredStart + 40)) {
+    // A sender seek moves the element outside what this generation has
+    // APPENDED — follow it. Judged against the appended window, never the
+    // fetch head: read-ahead is normal, not a seek.
+    if (now > 1 && (now < this.windowLo - 10 || now > this.windowHi + 40)) {
       this.reposition(now);
       return;
     }
@@ -266,10 +274,15 @@ HlsFmp4Engine.prototype.pump_ = async function () {
       continue;
     }
     if (gen !== this.generation || this.dead) return;
-    if (this.timestampOffset == null) this.anchor_(bytes, declaredStart);
+    // Rebase THIS segment onto its declared slot — the declared grid and the
+    // real spans drift apart (measured), so the offset is per segment.
+    const raw = this.sidxStart_(bytes);
+    if (raw != null) this.currentOffset = declaredStart - raw;
     bytes.fileStart = this.nextFileStart;
     try { this.nextFileStart = this.mp4box.appendBuffer(bytes); }
     catch (e) { this.fatal_('demux: ' + e); return; }
+    this.windowHi = declaredStart + (seg.duration || 10);
+    if (this.segIndex === 0 || this.windowLo === 0) this.windowLo = Math.min(this.windowLo || declaredStart, declaredStart);
     this.segIndex++;
   }
 };
@@ -297,6 +310,8 @@ HlsFmp4Engine.prototype.reposition = function (time) {
     Math.max(0, sn - this.mediaSequence),
     Math.max(0, this.segments.length - 1));
   this.log('hlsengine: reposition ' + Math.round(time) + 's -> segment ' + sn);
+  this.windowLo = sn * 10;
+  this.windowHi = this.windowLo;
   for (let i = 0; i < this.buffers.length; i++) this.buffers[i].queue = [];
   try { this.mp4box.stop(); } catch (e) {}
   this.setupMp4box_();

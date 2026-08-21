@@ -349,7 +349,8 @@ if (!PREVIEW) {
       // splits them per track. CAF just sees a blob URL, same as the
       // direct-file MSE engine.
       engine = new HlsFmp4Engine(url, streamCodecs,
-                                 () => playerManager.getCurrentTimeSec() || 0, slog);
+                                 () => playerManager.getCurrentTimeSec() || 0, slog,
+                                 request.currentTime || 0);
       engine.onEngineFailed = (reason) => {
         slog('hls demux engine failed: ' + reason);
         teardownEngine();
