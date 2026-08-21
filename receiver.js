@@ -302,7 +302,15 @@ if (!PREVIEW) {
       playbackConfig.segmentRequestHandler = (request2) => {
         request2.url = request2.url.replace('.ts.m4s', '.ts');
       };
-      slog('plex stream load: manifest .ts segments wear .m4s for Shaka');
+      // Renamed segments append as fMP4 - but with no CODECS attribute
+      // anywhere Shaka still GUESSES the mimetype (AAC by default), and
+      // Chrome's demuxer refuses the append when the init segment says
+      // E-AC-3: "audio object type 0xa6 does not match what is specified
+      // in the mimetype" (measured). Make Shaka read the init instead.
+      playbackConfig.shakaConfig = {
+        manifest: { hls: { disableCodecGuessing: true } },
+      };
+      slog('plex stream load: manifest .ts segments wear .m4s for Shaka, codecs from init');
     }
     playerManager.setPlaybackConfig(playbackConfig);
     const meta = media.metadata || {};
