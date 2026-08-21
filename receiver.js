@@ -286,6 +286,25 @@ if (!PREVIEW) {
     teardownEngine();
     const media = request.media || {};
     const custom = media.customData || {};
+    // A Plex HLS stream's segments are fMP4 (measured: ftyp iso5/dby1 brands,
+    // sidx-opening) but NAMED ".ts", and the manifest declares no CODECS - so
+    // Shaka guesses MPEG-TS from the extension and pushes fMP4 bytes through
+    // the TS transmuxer (Shaka error 3018). Rename the segments in the
+    // MANIFEST Shaka reads, and rename them back on each request so Plex
+    // (which serves strictly by name - measured 404 on .m4s) still answers.
+    // Per-load config: package manifests name their segments honestly and
+    // must pass through untouched.
+    const playbackConfig = new cast.framework.PlaybackConfig();
+    const url = media.contentUrl || media.contentId || '';
+    if (url.indexOf('/transcode/universal/') >= 0) {
+      playbackConfig.manifestHandler = (manifest) =>
+        manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
+      playbackConfig.segmentRequestHandler = (request2) => {
+        request2.url = request2.url.replace('.ts.m4s', '.ts');
+      };
+      slog('plex stream load: manifest .ts segments wear .m4s for Shaka');
+    }
+    playerManager.setPlaybackConfig(playbackConfig);
     const meta = media.metadata || {};
     const poster = (meta.images && meta.images[0] && meta.images[0].url) || null;
     Screens.loading(meta.title || '', poster);
