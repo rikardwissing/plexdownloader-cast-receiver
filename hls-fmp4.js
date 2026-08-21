@@ -58,6 +58,13 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   // basis for "did the playhead leave what we have", immune to read-ahead.
   this.windowLo = 0;
   this.windowHi = 0;
+  // Seek settling: after a reposition the element takes a while to report the
+  // new position, and the pump reading the OLD position must not "correct"
+  // the seek away (field: reposition 1044 -> reposition 6 -> 1044, thrashing
+  // the demuxer). No drift-triggered reposition inside the grace window.
+  this.lastReposition = 0;
+  this.quotaLogged = 0;
+  this.appendsSinceEvict = 0;
   this.onEngineFailed = null;
   const self = this;
   this.mediaSource.addEventListener('sourceopen', function onOpen() {
@@ -211,9 +218,15 @@ HlsFmp4Engine.prototype.drain_ = function (entry) {
     entry.sb.appendBuffer(item.buf);
   } catch (e) {
     if (e && e.name === 'QuotaExceededError') {
-      // Drop what playback has left behind, then retry on the next drain.
+      // Put the fragment BACK (losing it left a gap the element stalled on),
+      // evict what playback has left behind, and retry on the next drain.
+      entry.queue.unshift(item);
       const now = this.getTime() || 0;
-      try { entry.sb.remove(0, Math.max(0, now - 30)); } catch (e2) {}
+      if (Date.now() - this.quotaLogged > 60000) {
+        this.quotaLogged = Date.now();
+        this.log('hlsengine: quota hit, evicting behind ' + Math.round(now - 30) + 's');
+      }
+      try { entry.sb.remove(0, Math.max(0.1, now - 30)); } catch (e2) {}
       return;
     }
     this.fatal_('append: ' + e);
@@ -247,7 +260,18 @@ HlsFmp4Engine.prototype.sidxStart_ = function (bytes) {
 
 HlsFmp4Engine.prototype.pump_ = async function () {
   const gen = ++this.generation;
+  let lastBeat = 0;
   while (!this.dead && gen === this.generation) {
+    if (Date.now() - lastBeat > 30000) {
+      lastBeat = Date.now();
+      let queues = '';
+      for (let i = 0; i < this.buffers.length; i++) {
+        queues += (i ? '/' : '') + this.buffers[i].queue.length;
+      }
+      this.log('hlsengine: t=' + Math.round(this.getTime() || 0) +
+               ' window=[' + Math.round(this.windowLo) + ',' + Math.round(this.windowHi) +
+               '] seg=' + (this.mediaSequence + this.segIndex) + ' q=' + queues);
+    }
     if (this.segIndex >= this.segments.length) {
       if (this.ended) { this.finish_(); return; }
       await this.sleep_(3000);
@@ -259,7 +283,8 @@ HlsFmp4Engine.prototype.pump_ = async function () {
     // A sender seek moves the element outside what this generation has
     // APPENDED — follow it. Judged against the appended window, never the
     // fetch head: read-ahead is normal, not a seek.
-    if (now > 1 && (now < this.windowLo - 10 || now > this.windowHi + 40)) {
+    if (now > 1 && (now < this.windowLo - 10 || now > this.windowHi + 40) &&
+        Date.now() - this.lastReposition > 8000) {
       this.reposition(now);
       return;
     }
@@ -282,8 +307,20 @@ HlsFmp4Engine.prototype.pump_ = async function () {
     try { this.nextFileStart = this.mp4box.appendBuffer(bytes); }
     catch (e) { this.fatal_('demux: ' + e); return; }
     this.windowHi = declaredStart + (seg.duration || 10);
-    if (this.segIndex === 0 || this.windowLo === 0) this.windowLo = Math.min(this.windowLo || declaredStart, declaredStart);
     this.segIndex++;
+    // Keep quota pressure off before it bites: every few segments, drop what
+    // playback has left well behind (opportunistic - skipped while updating).
+    if (++this.appendsSinceEvict >= 6) {
+      this.appendsSinceEvict = 0;
+      const behind = (this.getTime() || 0) - 40;
+      if (behind > this.windowLo) {
+        this.windowLo = behind;
+        for (let i = 0; i < this.buffers.length; i++) {
+          const sb = this.buffers[i].sb;
+          if (!sb.updating) { try { sb.remove(0, behind); } catch (e) {} }
+        }
+      }
+    }
   }
 };
 
@@ -305,6 +342,13 @@ HlsFmp4Engine.prototype.finish_ = function () {
 
 HlsFmp4Engine.prototype.reposition = function (time) {
   if (this.dead) return;
+  // A seek INTO what is already appended needs no demuxer reset - the data is
+  // there and resetting is itself a stall. Only leave the window for real.
+  if (time >= this.windowLo - 5 && time <= this.windowHi + 5) {
+    this.lastReposition = Date.now();
+    return;
+  }
+  this.lastReposition = Date.now();
   const sn = Math.max(this.mediaSequence, Math.floor(Math.max(0, time) / 10));
   this.segIndex = Math.min(
     Math.max(0, sn - this.mediaSequence),
