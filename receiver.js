@@ -212,6 +212,34 @@ if (!PREVIEW) {
   const messages = cast.framework.messages;
   const events = cast.framework.events;
 
+  // Diagnostic eyes for the silent-load mystery: between LOAD and the first
+  // PLAYING, report every CORE and DEBUG player event (deduped, capped) into
+  // the sender's diagnostics. MPL - CAF's default HLS stack - failed a Dolby
+  // stream with no ERROR on our listeners; this is how we learn what, if
+  // anything, it says instead.
+  const loadEyes = { active: false, count: 0, last: '' };
+  function slogEvent(e) {
+    if (!loadEyes.active || loadEyes.count >= 40) return;
+    let line = 'ev ' + (e && e.type);
+    try {
+      if (e && e.detailedErrorCode != null) line += ' code=' + e.detailedErrorCode;
+      if (e && e.error) line += ' err=' + JSON.stringify(e.error).slice(0, 140);
+      if (e && e.mediaStatus && e.mediaStatus.playerState) {
+        line += ' state=' + e.mediaStatus.playerState;
+        if (e.mediaStatus.idleReason) line += ' idle=' + e.mediaStatus.idleReason;
+      }
+      if (e && e.reason) line += ' reason=' + e.reason;
+    } catch (err) {}
+    if (line === loadEyes.last) return;
+    loadEyes.last = line;
+    loadEyes.count++;
+    slog(line);
+  }
+  playerManager.addEventListener(events.category.CORE, slogEvent);
+  playerManager.addEventListener(events.category.DEBUG, slogEvent);
+  playerManager.addEventListener(events.EventType.PLAYING,
+                                 () => { loadEyes.active = false; });
+
   // A load that never finishes gets a verdict, not an eternal spinner. CAF
   // errors loudly on a package it can't play (Shaka gates the manifest), but a
   // default HLS load whose audio can't open — field case: an original-quality
@@ -249,6 +277,7 @@ if (!PREVIEW) {
     const poster = (meta.images && meta.images[0] && meta.images[0].url) || null;
     Screens.loading(meta.title || '', poster);
     armLoadWatch();
+    loadEyes.active = true; loadEyes.count = 0; loadEyes.last = '';
     if (custom.mseEngine && window.MediaSource && typeof MP4Box !== 'undefined') {
       const url = media.contentUrl || media.contentId;
       lastLoad = { url, media: Object.assign({}, media), custom };
