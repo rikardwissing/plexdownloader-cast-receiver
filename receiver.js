@@ -30,6 +30,16 @@ function mseSupport(type) {
   catch (e) { return false; }
 }
 
+// CAF's platform-aware capability check, beside the raw-MSE one above. It
+// consults the actual device pipeline and the HDMI sink, and CAF's engines
+// route their decisions through it - so a Google TV that decodes Dolby
+// natively (proven: direct MP4+E-AC-3 plays with Atmos) can answer yes here
+// while vanilla MediaSource.isTypeSupported says no. Whether the two DISAGREE
+// on this device is exactly the question "could a Shaka HLS stream play AC-3".
+function canDisplay(mime, codec) {
+  try { return !!context.canDisplayType(mime, codec); } catch (e) { return false; }
+}
+
 function capabilities() {
   return {
     mse: !!window.MediaSource,
@@ -39,6 +49,9 @@ function capabilities() {
     audioAAC: mseSupport('audio/mp4; codecs="mp4a.40.2"'),
     audioAC3: mseSupport('audio/mp4; codecs="ac-3"'),
     audioEC3: mseSupport('audio/mp4; codecs="ec-3"'),
+    canDisplayAC3: canDisplay('audio/mp4', 'ac-3'),
+    canDisplayEC3: canDisplay('audio/mp4', 'ec-3'),
+    canDisplayHEVC: canDisplay('video/mp4', 'hvc1.2.4.L120.90'),
     // Beyond AAC and Dolby: the sender used to demand EVERY audio track be AAC
     // before it would enable the engine, so a file carrying one FLAC track lost
     // track switching entirely — for nothing, since FLAC has no passthrough to
