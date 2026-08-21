@@ -338,7 +338,16 @@ if (!PREVIEW) {
       ? custom.streamCodecs : null;
     const dolbyStream = isUniversal && streamCodecs &&
       /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
-    if (dolbyStream && window.MediaSource && typeof MP4Box !== 'undefined' &&
+    const container = (typeof custom.streamContainer === 'string')
+      ? custom.streamContainer : null;
+    if (isUniversal && container === 'mpegts') {
+      // Real MPEG-TS (the h264 recipe branch): the STANDARD path. Shaka's own
+      // TS transmuxer demuxes — including AC-3/E-AC-3 — so no rename, no
+      // CODECS injection, no engine. This is the shape the whole 2026-08-21
+      // investigation concluded a Cast receiver actually wants.
+      slog('plex stream load: mpegts, plain shaka' +
+           (streamCodecs ? ' (codecs ' + streamCodecs + ')' : ''));
+    } else if (dolbyStream && window.MediaSource && typeof MP4Box !== 'undefined' &&
         typeof HlsFmp4Engine !== 'undefined') {
       // Muxed Dolby cannot pass MSE on this platform in ANY engine
       // configuration (all measured 2026-08-21: combined buffer refused at
@@ -351,6 +360,16 @@ if (!PREVIEW) {
       engine = new HlsFmp4Engine(url, streamCodecs,
                                  () => playerManager.getCurrentTimeSec() || 0, slog,
                                  request.currentTime || 0);
+      // The media element, if this platform lets the page see it — the engine
+      // uses it to jump the sub-second buffered gaps a raw element stalls on.
+      engine.findMedia = () => {
+        let el = document.querySelector('video');
+        if (!el) {
+          const player = document.querySelector('cast-media-player');
+          if (player && player.shadowRoot) el = player.shadowRoot.querySelector('video');
+        }
+        return el;
+      };
       engine.onEngineFailed = (reason) => {
         slog('hls demux engine failed: ' + reason);
         teardownEngine();

@@ -48,12 +48,19 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.segments = [];           // [{uri, duration}]
   this.segIndex = 0;
   this.ended = false;           // playlist carried EXT-X-ENDLIST
-  // Plex declares every segment 10s but the real spans drift (measured ~12s
-  // on copy sessions) - a single global offset strands later segments minutes
-  // from their declared slot. Every segment is rebased individually: its own
-  // sidx says where its content really starts, and the difference to its
-  // declared slot rides each queued fragment as a per-append timestampOffset.
+  // Rebasing, third iteration (each measured in the field): ONE offset per
+  // RUN, computed from the run's first segment. A single global offset
+  // strands later segments (declared 10s vs drifting real spans); rebasing
+  // EVERY segment to its slot leaves sub-second gaps at boundaries whenever a
+  // real span comes up short, and a raw element stalls on a gap forever
+  // (field: t frozen at 738 inside window [730,800]). Source content is
+  // contiguous, so within a run the jitter does not accumulate — anchoring
+  // once keeps every boundary seamless, at the cost of a bounded (~2s) skew
+  // against the declared grid.
   this.currentOffset = 0;
+  this.runAnchored = false;
+  this.findMedia = null;        // set by the page when the element is visible to JS
+  this.lastNudge = 0;
   // The window of DECLARED time this generation has appended - the honest
   // basis for "did the playhead leave what we have", immune to read-ahead.
   this.windowLo = 0;
@@ -264,14 +271,24 @@ HlsFmp4Engine.prototype.pump_ = async function () {
   while (!this.dead && gen === this.generation) {
     if (Date.now() - lastBeat > 30000) {
       lastBeat = Date.now();
-      let queues = '';
+      let queues = '', ranges = '';
       for (let i = 0; i < this.buffers.length; i++) {
         queues += (i ? '/' : '') + this.buffers[i].queue.length;
+        try {
+          const b = this.buffers[i].sb.buffered;
+          let r = '';
+          for (let j = 0; j < b.length; j++) {
+            r += (j ? ' ' : '') + Math.round(b.start(j)) + '-' + Math.round(b.end(j));
+          }
+          ranges += (i ? ' | ' : '') + r;
+        } catch (e) {}
       }
       this.log('hlsengine: t=' + Math.round(this.getTime() || 0) +
                ' window=[' + Math.round(this.windowLo) + ',' + Math.round(this.windowHi) +
-               '] seg=' + (this.mediaSequence + this.segIndex) + ' q=' + queues);
+               '] seg=' + (this.mediaSequence + this.segIndex) + ' q=' + queues +
+               ' buf=' + ranges);
     }
+    this.nudgeIfStalled_();
     if (this.segIndex >= this.segments.length) {
       if (this.ended) { this.finish_(); return; }
       await this.sleep_(3000);
@@ -299,10 +316,18 @@ HlsFmp4Engine.prototype.pump_ = async function () {
       continue;
     }
     if (gen !== this.generation || this.dead) return;
-    // Rebase THIS segment onto its declared slot — the declared grid and the
-    // real spans drift apart (measured), so the offset is per segment.
-    const raw = this.sidxStart_(bytes);
-    if (raw != null) this.currentOffset = declaredStart - raw;
+    // Anchor once per run: the run's first segment fixes the offset, and the
+    // contiguous source keeps every later boundary seamless.
+    if (!this.runAnchored) {
+      const raw = this.sidxStart_(bytes);
+      if (raw != null) {
+        this.currentOffset = declaredStart - raw;
+        this.runAnchored = true;
+        this.log('hlsengine: run anchor raw=' + raw.toFixed(2) +
+                 ' declared=' + declaredStart +
+                 ' offset=' + this.currentOffset.toFixed(2));
+      }
+    }
     bytes.fileStart = this.nextFileStart;
     try { this.nextFileStart = this.mp4box.appendBuffer(bytes); }
     catch (e) { this.fatal_('demux: ' + e); return; }
@@ -322,6 +347,32 @@ HlsFmp4Engine.prototype.pump_ = async function () {
       }
     }
   }
+};
+
+// The safety net for any gap that still slips through (a seek junction
+// between two runs, an eviction edge): when the element sits just before a
+// buffered range for several ticks, hop over the hole. Needs the element —
+// only possible where the page can see it (findMedia); logged either way.
+HlsFmp4Engine.prototype.nudgeIfStalled_ = function () {
+  if (!this.findMedia || Date.now() - this.lastNudge < 5000) return;
+  let el = null;
+  try { el = this.findMedia(); } catch (e) {}
+  if (!el || el.paused || el.readyState >= 3) return;
+  const t = el.currentTime || 0;
+  let jumpTo = null;
+  try {
+    const b = el.buffered;
+    for (let j = 0; j < b.length; j++) {
+      if (b.start(j) > t && b.start(j) - t < 3 && b.end(j) - b.start(j) > 1) {
+        jumpTo = b.start(j) + 0.1;
+        break;
+      }
+    }
+  } catch (e) {}
+  if (jumpTo == null) return;
+  this.lastNudge = Date.now();
+  this.log('hlsengine: gap at ' + t.toFixed(2) + ', hopping to ' + jumpTo.toFixed(2));
+  try { el.currentTime = jumpTo; } catch (e) {}
 };
 
 HlsFmp4Engine.prototype.finish_ = function () {
@@ -356,6 +407,7 @@ HlsFmp4Engine.prototype.reposition = function (time) {
   this.log('hlsengine: reposition ' + Math.round(time) + 's -> segment ' + sn);
   this.windowLo = sn * 10;
   this.windowHi = this.windowLo;
+  this.runAnchored = false;
   for (let i = 0; i < this.buffers.length; i++) this.buffers[i].queue = [];
   try { this.mp4box.stop(); } catch (e) {}
   this.setupMp4box_();
