@@ -52,6 +52,14 @@ function capabilities() {
     canDisplayAC3: canDisplay('audio/mp4', 'ac-3'),
     canDisplayEC3: canDisplay('audio/mp4', 'ec-3'),
     canDisplayHEVC: canDisplay('video/mp4', 'hvc1.2.4.L120.90'),
+    // The COMBINED muxed-variant question, which the separate answers above
+    // cannot settle: an HLS stream is one muxed variant, so Shaka's support
+    // filter asks about video/mp4 with BOTH codecs at once - and a platform
+    // can accept ec-3 alone yet refuse it inside a combined video query
+    // (suspected cause of Shaka 4032 with an honest CODECS attribute).
+    muxedH264EC3: mseSupport('video/mp4; codecs="avc1.42E01E,ec-3"'),
+    muxedH264AC3: mseSupport('video/mp4; codecs="avc1.42E01E,ac-3"'),
+    canDisplayMuxedH264EC3: canDisplay('video/mp4', 'avc1.42E01E,ec-3'),
     // Beyond AAC and Dolby: the sender used to demand EVERY audio track be AAC
     // before it would enable the engine, so a file carrying one FLAC track lost
     // track switching entirely — for nothing, since FLAC has no passthrough to
