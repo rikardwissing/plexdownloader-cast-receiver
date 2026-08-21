@@ -345,5 +345,15 @@ if (!PREVIEW) {
     }
   });
 
-  context.start();
+  // Shaka for HLS instead of MPL, CAF's legacy default. Measured 2026-08-21
+  // on the Google TV: MPL stalled a Dolby fMP4 stream in BUFFERING forever
+  // (events stop after DURATION_CHANGE, no error) and 411'd a Dolby package
+  // at the master manifest - while BOTH capability APIs (raw MSE and
+  // canDisplayType) answered yes to ac-3/ec-3, and the same device plays
+  // MP4+E-AC-3 direct files with Atmos. Shaka handles fMP4 HLS properly and
+  // consults the platform-aware canDisplayType, so both cases have a real
+  // chance of simply playing. Revert this option if package casts regress.
+  const startOptions = new cast.framework.CastReceiverOptions();
+  startOptions.useShakaForHls = true;
+  context.start(startOptions);
 }
