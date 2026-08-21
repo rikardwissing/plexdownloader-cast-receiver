@@ -40,6 +40,29 @@ function canDisplay(mime, codec) {
   try { return !!context.canDisplayType(mime, codec); } catch (e) { return false; }
 }
 
+// Whether addSourceBuffer ACCEPTS the muxed Dolby type that isTypeSupported
+// and canDisplayType both refuse (measured). The two layers can disagree, and
+// which one is telling the truth decides whether a capability shim can walk
+// the muxed variant past Shaka's filter - or whether the only road is
+// demuxing into the two-buffer topology this platform provably accepts.
+// addSourceBuffer needs an OPEN MediaSource, so the probe is async; the pong
+// reports 'pending' until it lands (milliseconds after page load).
+let sbMuxedEC3 = 'pending';
+(function probeAddSourceBuffer() {
+  try {
+    const ms = new MediaSource();
+    const probeVideo = document.createElement('video');
+    ms.addEventListener('sourceopen', () => {
+      try {
+        ms.addSourceBuffer('video/mp4; codecs="avc1.42E01E,ec-3"');
+        sbMuxedEC3 = true;
+      } catch (e) { sbMuxedEC3 = String((e && e.name) || e); }
+      try { URL.revokeObjectURL(probeVideo.src); } catch (e) {}
+    });
+    probeVideo.src = URL.createObjectURL(ms);
+  } catch (e) { sbMuxedEC3 = 'setup failed: ' + e; }
+})();
+
 function capabilities() {
   return {
     mse: !!window.MediaSource,
@@ -60,6 +83,7 @@ function capabilities() {
     muxedH264EC3: mseSupport('video/mp4; codecs="avc1.42E01E,ec-3"'),
     muxedH264AC3: mseSupport('video/mp4; codecs="avc1.42E01E,ac-3"'),
     canDisplayMuxedH264EC3: canDisplay('video/mp4', 'avc1.42E01E,ec-3'),
+    sbMuxedH264EC3: sbMuxedEC3,
     // Beyond AAC and Dolby: the sender used to demand EVERY audio track be AAC
     // before it would enable the engine, so a file carrying one FLAC track lost
     // track switching entirely — for nothing, since FLAC has no passthrough to
