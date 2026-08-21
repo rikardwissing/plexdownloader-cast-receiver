@@ -430,5 +430,13 @@ if (!PREVIEW) {
   // chance of simply playing. Revert this option if package casts regress.
   const startOptions = new cast.framework.CastReceiverOptions();
   startOptions.useShakaForHls = true;
+  // The device firmware's CAF defaulted to Shaka 4.9.2-caf2 (seen in error
+  // stacks) - years behind the documented 4.15.56 default, and Google's own
+  // migration guide says Shaka-for-HLS should pin >=4.15.56. 4.16.45 is the
+  // newest 4.x LTS inside the supported range (>=2.5.6 <5.0.0) and carries
+  // the mediaCapabilities-based variant filtering that judges a muxed
+  // variant's audio and video SEPARATELY - the exact check our muxed Dolby
+  // stream failed under 4.9's combined-string logic (Shaka 4032).
+  startOptions.shakaVersion = '4.16.45';
   context.start(startOptions);
 }
