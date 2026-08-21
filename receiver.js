@@ -333,15 +333,56 @@ if (!PREVIEW) {
     // must pass through untouched.
     const playbackConfig = new cast.framework.PlaybackConfig();
     const url = media.contentUrl || media.contentId || '';
-    if (url.indexOf('/transcode/universal/') >= 0) {
-      // BASELINE under the pinned Shaka 4.16 (2026-08-21.10): every workaround
-      // accumulated against 4.9 (the .ts->.m4s rename, the injected CODECS
-      // attribute, the guessing toggles) is deliberately OFF, so 4.16's own
-      // defaults get measured clean. The addSourceBuffer relabel shim in
-      // index.html stays: it self-gates on one exact broken pattern and logs
-      // whenever it fires. The known wall is unchanged either way -
-      // addSourceBuffer refuses muxed Dolby at the platform level (measured).
-      slog('plex stream load: baseline (no manifest interventions), shaka pinned');
+    const isUniversal = url.indexOf('/transcode/universal/') >= 0;
+    const streamCodecs = (typeof custom.streamCodecs === 'string' && custom.streamCodecs)
+      ? custom.streamCodecs : null;
+    const dolbyStream = isUniversal && streamCodecs &&
+      /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
+    if (dolbyStream && window.MediaSource && typeof MP4Box !== 'undefined' &&
+        typeof HlsFmp4Engine !== 'undefined') {
+      // Muxed Dolby cannot pass MSE on this platform in ANY engine
+      // configuration (all measured 2026-08-21: combined buffer refused at
+      // three API layers; Shaka appends muxed bytes unsplit; pure 4.16
+      // silently hangs). The platform DOES accept the demuxed two-buffer
+      // topology - the packages play that way - so the receiver demuxes for
+      // real: hls-fmp4.js fetches the session's own segments and mp4box
+      // splits them per track. CAF just sees a blob URL, same as the
+      // direct-file MSE engine.
+      engine = new HlsFmp4Engine(url, streamCodecs,
+                                 () => playerManager.getCurrentTimeSec() || 0, slog);
+      engine.onEngineFailed = (reason) => {
+        slog('hls demux engine failed: ' + reason);
+        teardownEngine();
+        Screens.error("Can't play this video",
+                      'The stream could not be demuxed for this TV.');
+      };
+      media.contentUrl = engine.objectUrl;
+      media.contentId = engine.objectUrl;
+      media.contentType = 'video/mp4';
+      slog('plex dolby stream: receiver demux engine, codecs ' + streamCodecs);
+    } else if (isUniversal) {
+      // Non-Dolby streams stay on Shaka, WITH the interventions: the clean
+      // 4.16 baseline (2026-08-21.10) proved Plex's .ts-named fMP4 sends the
+      // extension-guessing pipeline into a silent hang for any codec, so the
+      // manifest must say fMP4 (rename) and say the codecs (sender's own
+      // strings; guessing and init-parsing both measured failing).
+      playbackConfig.manifestHandler = (manifest) => {
+        let out = manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
+        if (streamCodecs && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
+            out.indexOf('CODECS=') < 0) {
+          out = out.replace(/^#EXT-X-STREAM-INF:(.*)$/gm,
+            '#EXT-X-STREAM-INF:$1,CODECS="' + streamCodecs + '"');
+        }
+        return out;
+      };
+      playbackConfig.segmentRequestHandler = (request2) => {
+        request2.url = request2.url.replace('.ts.m4s', '.ts');
+      };
+      if (!streamCodecs) {
+        playbackConfig.shakaConfig = { manifest: { hls: { disableCodecGuessing: true } } };
+      }
+      slog('plex stream load: .m4s rename' +
+           (streamCodecs ? (', CODECS="' + streamCodecs + '"') : ', codecs from init'));
     }
     playerManager.setPlaybackConfig(playbackConfig);
     const meta = media.metadata || {};

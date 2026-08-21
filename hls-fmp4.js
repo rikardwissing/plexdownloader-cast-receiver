@@ -78,7 +78,7 @@ HlsFmp4Engine.prototype.sleep_ = function (ms) {
 HlsFmp4Engine.prototype.bytes_ = async function (url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error('HTTP ' + r.status);
-  return new Uint8Array(await r.arrayBuffer());
+  return r.arrayBuffer();   // mp4box consumes ArrayBuffers carrying .fileStart
 };
 HlsFmp4Engine.prototype.text_ = async function (url) {
   const r = await fetch(url);
@@ -176,8 +176,7 @@ HlsFmp4Engine.prototype.setupMp4box_ = function () {
     } catch (e) { self.fatal_('buffers: ' + e); }
   };
   box.onSegment = function (id, entry, buffer) { self.enqueue_(entry, buffer); };
-  const init = this.initBytes.slice ? this.initBytes.slice() : this.initBytes;
-  init.buffer.fileStart !== undefined || (init.fileStart = 0);
+  const init = this.initBytes.slice(0);
   init.fileStart = 0;
   this.nextFileStart = box.appendBuffer(init);
 };
@@ -214,7 +213,7 @@ HlsFmp4Engine.prototype.drain_ = function (entry) {
 // subtitle clock on the browser receivers — no magic constants.
 HlsFmp4Engine.prototype.anchor_ = function (bytes, declaredStart) {
   try {
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const dv = new DataView(bytes);
     let off = 0;
     while (off + 8 <= dv.byteLength) {
       const size = dv.getUint32(off);
