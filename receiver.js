@@ -282,8 +282,13 @@ if (!PREVIEW) {
   }
   playerManager.addEventListener(events.category.CORE, slogEvent);
   playerManager.addEventListener(events.category.DEBUG, slogEvent);
-  playerManager.addEventListener(events.EventType.PLAYING,
-                                 () => { loadEyes.active = false; });
+  playerManager.addEventListener(events.EventType.PLAYING, () => {
+    loadEyes.active = false;
+    if (window.__sbRelabels && window.__sbRelabels.length) {
+      slog('sb relabels: ' + window.__sbRelabels.join(' | '));
+      window.__sbRelabels = [];
+    }
+  });
 
   // A load that never finishes gets a verdict, not an eternal spinner. CAF
   // errors loudly on a package it can't play (Shaka gates the manifest), but a
@@ -404,6 +409,10 @@ if (!PREVIEW) {
                                  () => Screens.show('idle'));
   playerManager.addEventListener(events.EventType.ERROR, (e) => {
     clearLoadWatch();
+    if (window.__sbRelabels && window.__sbRelabels.length) {
+      slog('sb relabels before error: ' + window.__sbRelabels.join(' | '));
+      window.__sbRelabels = [];
+    }
     const code = (e && e.detailedErrorCode) || 0;
     slog('player error: detailedErrorCode=' + code +
          (e && e.error ? ' ' + JSON.stringify(e.error) : ''));
