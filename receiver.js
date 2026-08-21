@@ -212,6 +212,31 @@ if (!PREVIEW) {
   const messages = cast.framework.messages;
   const events = cast.framework.events;
 
+  // A load that never finishes gets a verdict, not an eternal spinner. CAF
+  // errors loudly on a package it can't play (Shaka gates the manifest), but a
+  // default HLS load whose audio can't open — field case: an original-quality
+  // stream carrying AC-3, which no Cast receiver plays in HLS — just sits in
+  // "loading" forever with no ERROR event. The budget is generous because a
+  // still-converting server can honestly take a while to produce first bytes.
+  let loadWatch = null;
+  function clearLoadWatch() { if (loadWatch) { clearTimeout(loadWatch); loadWatch = null; } }
+  function armLoadWatch() {
+    clearLoadWatch();
+    loadWatch = setTimeout(() => {
+      loadWatch = null;
+      let state = 'unknown';
+      try { state = playerManager.getPlayerState(); } catch (e) {}
+      if (state === messages.PlayerState.PLAYING ||
+          state === messages.PlayerState.PAUSED) return;
+      slog('load watchdog: still ' + state + ' after 45s - giving up');
+      Screens.error("Can't play this video",
+        'The stream never started. Its audio or video is likely a format ' +
+        'this TV can\'t play in a stream - Dolby audio only plays from a ' +
+        'direct file.');
+      try { playerManager.stop(); } catch (e) {}
+    }, 45000);
+  }
+
   // LOAD: brand loading screen while the stream spins up, and route flagged
   // media through the MSE engine — CAF just sees a blob URL and drives
   // play/pause/time as usual. Everything else (packages, Dolby direct files)
@@ -223,6 +248,7 @@ if (!PREVIEW) {
     const meta = media.metadata || {};
     const poster = (meta.images && meta.images[0] && meta.images[0].url) || null;
     Screens.loading(meta.title || '', poster);
+    armLoadWatch();
     if (custom.mseEngine && window.MediaSource && typeof MP4Box !== 'undefined') {
       const url = media.contentUrl || media.contentId;
       lastLoad = { url, media: Object.assign({}, media), custom };
@@ -256,10 +282,11 @@ if (!PREVIEW) {
   // engine cast in the field). The LOAD interceptor is the teardown point.
 
   playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE,
-                                 () => Screens.show('playback'));
+                                 () => { clearLoadWatch(); Screens.show('playback'); });
   playerManager.addEventListener(events.EventType.MEDIA_FINISHED,
                                  () => Screens.show('idle'));
   playerManager.addEventListener(events.EventType.ERROR, (e) => {
+    clearLoadWatch();
     const code = (e && e.detailedErrorCode) || 0;
     slog('player error: detailedErrorCode=' + code +
          (e && e.error ? ' ' + JSON.stringify(e.error) : ''));
