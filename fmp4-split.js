@@ -56,20 +56,24 @@
 
     isSupported(mimeType, contentType) {
       const mt = String(mimeType || '').toLowerCase();
-      if (mt.indexOf('mp4') < 0) return false;
-      if (typeof MP4Box === 'undefined' || !window.MediaSource) return false;
-      const codecs = codecList(mt);
-      if (!codecs.length) return false;
-      const hasVideo = codecs.some(function (c) { return VIDEO_CODEC.test(c); });
-      const hasDolby = codecs.some(function (c) { return DOLBY_CODEC.test(c); });
-      // The audio side of a muxed variant (a Dolby codec riding any mp4
-      // mimetype), or — under forceTransmux, which only OUR Dolby loads set —
-      // the video side that needs its muxed payload split.
-      if (hasDolby) return true;
-      return contentType === 'video' && hasVideo;
+      let answer = false;
+      if (mt.indexOf('mp4') >= 0 &&
+          typeof MP4Box !== 'undefined' && window.MediaSource) {
+        const codecs = codecList(mt);
+        const hasVideo = codecs.some(function (c) { return VIDEO_CODEC.test(c); });
+        const hasDolby = codecs.some(function (c) { return DOLBY_CODEC.test(c); });
+        // The audio side of a muxed variant (a Dolby codec riding any mp4
+        // mimetype), or — under forceTransmux, which only OUR Dolby loads set
+        // — the video side that needs its muxed payload split.
+        answer = codecs.length > 0 &&
+          (hasDolby || (contentType === 'video' && hasVideo));
+      }
+      log('fmp4split: isSupported(' + mimeType + ', ' + contentType + ') = ' + answer);
+      return answer;
     }
 
     convertCodecs(contentType, mimeType) {
+      log('fmp4split: convertCodecs(' + contentType + ', ' + mimeType + ')');
       const codecs = codecList(mimeType);
       let picked = null;
       for (let i = 0; i < codecs.length; i++) {
@@ -126,6 +130,12 @@
     }
 
     async transmux(data, stream, reference, duration, contentType) {
+      if (reference == null || !this.loggedMedia_) {
+        this.loggedMedia_ = reference != null;
+        log('fmp4split: transmux ' + contentType +
+            (reference == null ? ' INIT' : ' first media') +
+            ' (' + (data.byteLength || 0) + 'b)');
+      }
       this.contentType_ = contentType;
       let bytes = data instanceof ArrayBuffer
         ? data
