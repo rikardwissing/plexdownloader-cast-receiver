@@ -1040,9 +1040,22 @@ MkvEngine.prototype.repump_ = function (seconds) {
   this.abortInflight_();
   for (var k in this.lanes) {
     var lane = this.lanes[k];
+    // The OLD run's leftovers must not follow us across the seek: an append
+    // in flight would delay the new run behind it (abort also resets the
+    // SourceBuffer's segment parser), and queued fragments would append
+    // stale regions after the jump.
+    if (lane.sb && lane.sb.updating) { try { lane.sb.abort(); } catch (e) {} }
+    lane.queue = [];
     lane.pending = [];
     lane.pendingSinceMs = null;
     lane.timeline.reset();
+    // Re-open with an init segment: a repump is a DISCONTINUITY. Desktop
+    // Chrome takes a mid-stream jump in stride, but the TV's pipeline can
+    // wedge its audio renderer on one (field 2026-08-24: video playing,
+    // audio gone, bar stuck buffering) — a fresh init makes every seek
+    // look like a clean start. Rebuilt from the next frame; every codec
+    // goes through the deferred-init path on this flag.
+    lane.initSent = false;
   }
   this.log('mkvengine: repump ' + Math.round(seconds) + 's');
   // Re-anchor the high-water mark: it is per-RUN, not per-file. Left at the
