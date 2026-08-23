@@ -743,7 +743,15 @@ function MkvEngine(url, audioTypeIndex, opts) {
                         signal: signal })
       .then(function (r) {
         if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
-        return r.arrayBuffer();
+        return r.arrayBuffer().then(function (buf) {
+          // A 200 is the WHOLE file from a server that ignored the Range
+          // header. Slice it to the window asked for, or the pump labels
+          // bytes with offsets they don't have and demuxes garbage.
+          if (r.status === 200 && buf.byteLength > end - start + 1) {
+            return buf.slice(start, end + 1);
+          }
+          return buf;
+        });
       });
   };
   this.fetchTimeoutMs = opts.fetchTimeoutMs || 15000;
@@ -758,8 +766,9 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.demux = new MkvDemuxer();
   this.lanes = {};              // trackNumber -> {muxer,timeline,sb,queue,pending,pendingMs,initSent}
   this.onEngineFailed = null;
-  this.appendedMs = 0;          // furthest pts appended (ms)
-  this.lastReposition = 0;
+  this.appendedMs = 0;          // furthest pts appended THIS run (repump re-anchors)
+  this.lastFetchDoneAt = Date.now();
+  this.stallTimer = setInterval(function () { self.stallCheck_(); }, 2000);
   this.evictCountdown = 0;
   this.mediaSource.addEventListener('sourceopen', function onOpen() {
     self.mediaSource.removeEventListener('sourceopen', onOpen);
@@ -771,6 +780,7 @@ MkvEngine.prototype.destroy = function () {
   this.dead = true;
   this.generation++;
   this.abortInflight_();
+  if (this.stallTimer) { clearInterval(this.stallTimer); this.stallTimer = null; }
   try {
     if (this.mediaSource.readyState === 'open') {
       for (var k in this.lanes) {
@@ -828,12 +838,14 @@ MkvEngine.prototype.fetchRange_ = async function (start, end, gen) {
       var buf = await this.fetcher(start, end, ctrl ? ctrl.signal : undefined);
       if (timer) clearTimeout(timer);
       this.inflightAbort = null;
+      this.lastFetchDoneAt = Date.now();
       var took = Date.now() - t0;
       if (took > 5000) this.log('mkvengine: slow fetch @' + start + ' took ' + took + 'ms');
       return buf;
     } catch (e) {
       if (timer) clearTimeout(timer);
       this.inflightAbort = null;
+      this.lastFetchDoneAt = Date.now();
       lastErr = e;
       // Aborted because we were superseded or torn down — not an error.
       if (this.dead || (gen != null && gen !== this.generation)) throw e;
@@ -947,6 +959,10 @@ MkvEngine.prototype.drain_ = function (lane) {
       lane.queue.unshift(lane.queue.shift());
       var now = this.getTime() || 0;
       try { lane.sb.remove(0, Math.max(0.1, now - 30)); } catch (e2) {}
+      // A backward seek leaves the OLD run's far-ahead buffer in place;
+      // quota relief must clear that too, or once nothing is left behind
+      // the playhead this retry loop spins without ever freeing a byte.
+      try { lane.sb.remove(now + 90, Infinity); } catch (e3) {}
       return;
     }
     this.fatal_('append: ' + e);
@@ -961,11 +977,55 @@ MkvEngine.prototype.flushLane_ = function (lane) {
   this.drain_(lane);
 };
 
+// Is `seconds` inside EVERY lane's buffered ranges (with a second of runway)?
+// This — not a timer — is what decides whether a seek needs a repump. The
+// 4s debounce this replaces silently DROPPED any seek within 4s of the last
+// repump; an unbuffered target then waited forever for data nothing was
+// going to fetch (field stall 2026-08-24, "especially seeking backwards").
+MkvEngine.prototype.isBuffered_ = function (seconds) {
+  for (var k in this.lanes) {
+    var sb = this.lanes[k].sb;
+    if (!sb) continue;
+    var ok = false;
+    try {
+      var b = sb.buffered;
+      for (var i = 0; i < b.length; i++) {
+        if (b.start(i) <= seconds + 0.1 && seconds + 1 <= b.end(i)) { ok = true; break; }
+      }
+    } catch (e) {}
+    if (!ok) return false;
+  }
+  return true;
+};
+
+// The element never announces "I am starving in a gap": running into
+// unbuffered territory fires no seek event, it just waits forever. The field
+// case: seek BACK into a buffered island and play through its end while the
+// pump is far ahead (or done) — nothing ever fills the hole. So the engine
+// checks for itself: playhead in a hole, no fetch in flight and none recent
+// (i.e. the pump is not already on its way) → repump from the playhead.
+MkvEngine.prototype.stallCheck_ = function () {
+  if (this.dead) return;
+  var t = this.getTime() || 0;
+  if (t <= 0) return;
+  var durSec = this.demux.durationMs() / 1000;
+  if (durSec && t + 1 >= durSec) return;         // the end is not a gap
+  if (this.isBuffered_(t + 0.3)) return;
+  if (this.inflightAbort) return;                // pump is actively fetching
+  if (Date.now() - this.lastFetchDoneAt < 3000) return;  // …or just was
+  this.log('mkvengine: gap at ' + Math.round(t) + 's — repump');
+  this.repump_(t);
+};
+
 MkvEngine.prototype.reposition = function (seconds) {
   if (this.dead) return;
+  // Before the lanes exist there is nothing to reposition — start_ reads the
+  // element's time itself when it starts the first pump.
+  var haveLanes = false;
+  for (var k in this.lanes) { haveLanes = true; break; }
+  if (!haveLanes) return;
   // In-window seeks play from what is buffered; only leave for real jumps.
-  if (Date.now() - this.lastReposition < 4000) return;
-  this.lastReposition = Date.now();
+  if (this.isBuffered_(seconds)) return;
   this.repump_(seconds);
 };
 
@@ -985,6 +1045,11 @@ MkvEngine.prototype.repump_ = function (seconds) {
     lane.timeline.reset();
   }
   this.log('mkvengine: repump ' + Math.round(seconds) + 's');
+  // Re-anchor the high-water mark: it is per-RUN, not per-file. Left at the
+  // old run's furthest point, a backward seek made the fresh pump's first
+  // backpressure check see "a minute ahead already" and sleep FOREVER
+  // without fetching a byte (the 2026-08-24 backward-seek stall).
+  this.appendedMs = ms;
   this.pump_(this.offsetForMs_(ms));
 };
 
