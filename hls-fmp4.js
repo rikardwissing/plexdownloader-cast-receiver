@@ -20,7 +20,7 @@
 // the element clock equals the declared grid — the same clock the phone and
 // the browser receivers use, so positions survive handoffs.
 
-const HLS_ENGINE_VERSION = '2026-08-23.5';
+const HLS_ENGINE_VERSION = '2026-08-23.6';
 
 function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.masterUrl = masterUrl;
@@ -93,6 +93,7 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.synthTrackEl = null;
   this.synthTimer = null;
   this.paintTimer = null;
+  this.subDiagTimer = null;
   this.paintedOnce = false;
   this.onEngineFailed = null;
   const self = this;
@@ -107,6 +108,7 @@ HlsFmp4Engine.prototype.destroy = function () {
   this.generation++;
   if (this.synthTimer) { clearInterval(this.synthTimer); this.synthTimer = null; }
   if (this.paintTimer) { clearInterval(this.paintTimer); this.paintTimer = null; }
+  if (this.subDiagTimer) { clearInterval(this.subDiagTimer); this.subDiagTimer = null; }
   if (this.synthTrackEl) {
     try { URL.revokeObjectURL(this.synthTrackEl.src); } catch (e) {}
     try { this.synthTrackEl.parentNode.removeChild(this.synthTrackEl); } catch (e) {}
@@ -311,6 +313,7 @@ HlsFmp4Engine.prototype.rebuildSynth_ = function (shift) {
   // poll that re-asserts the mode first survives that.
   if (!this.paintTimer) {
     this.paintTimer = setInterval(function () { self.paintCues_(); }, 400);
+    this.subDiagTimer = setInterval(function () { self.subDiag_(); }, 5000);
   }
   this.paintCues_();
   this.synthShift = shift;
@@ -324,13 +327,50 @@ HlsFmp4Engine.prototype.captionBox_ = function () {
     box = document.createElement('div');
     box.id = 'hlsengine-captions';
     box.style.cssText =
-      'position:fixed;left:10%;right:10%;bottom:8%;z-index:9999;' +
+      'position:absolute;left:10%;right:10%;bottom:8%;z-index:9999;' +
       'text-align:center;pointer-events:none;font-family:sans-serif;' +
       'font-size:4.2vh;line-height:1.35;color:#fff;' +
       'text-shadow:0 0 4px #000,0 2px 4px #000;';
-    document.body.appendChild(box);
+    // Mount NEXT TO the media element, inside the player's shadow root: on a
+    // TV compositor the video is a hardware plane, and a document.body
+    // overlay can lose to it — CAF's own UI lives beside the element and
+    // provably renders above the picture, so that is where captions go too.
+    let host = null;
+    try {
+      const el = this.findMedia && this.findMedia();
+      if (el && el.parentNode) host = el.parentNode;
+    } catch (e) {}
+    if (!host) {
+      host = document.body;
+      box.style.position = 'fixed';
+    }
+    host.appendChild(box);
+    this.log('hlsengine: caption box mounted in ' +
+             (host === document.body ? 'body' : 'player shadow'));
   }
   return box;
+};
+
+// The one log that names a subtitle failure: track state, cue counts, and
+// the cue TIME RANGE against the element clock — a mismatch means timing, an
+// empty cue list means loading, a knocked mode means CAF.
+HlsFmp4Engine.prototype.subDiag_ = function () {
+  if (this.dead) { if (this.subDiagTimer) clearInterval(this.subDiagTimer); return; }
+  let line = 'subdiag: t=' + Math.round(this.getTime() || 0);
+  try {
+    const trackEl = this.synthTrackEl;
+    const track = trackEl && trackEl.track;
+    if (!track) { this.log(line + ' no track'); return; }
+    line += ' mode=' + track.mode + ' ready=' + trackEl.readyState;
+    const cues = track.cues;
+    line += ' cues=' + (cues ? cues.length : 'null');
+    if (cues && cues.length) {
+      line += ' range=' + Math.round(cues[0].startTime) + '-' +
+              Math.round(cues[cues.length - 1].endTime);
+    }
+    line += ' active=' + (track.activeCues ? track.activeCues.length : 'null');
+  } catch (e) { line += ' err=' + e; }
+  this.log(line);
 };
 
 HlsFmp4Engine.prototype.paintCues_ = function () {
