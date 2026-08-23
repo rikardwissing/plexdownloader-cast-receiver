@@ -905,10 +905,17 @@ MkvEngine.prototype.flushLane_ = function (lane) {
 
 MkvEngine.prototype.reposition = function (seconds) {
   if (this.dead) return;
-  var ms = Math.max(0, seconds * 1000);
   // In-window seeks play from what is buffered; only leave for real jumps.
   if (Date.now() - this.lastReposition < 4000) return;
   this.lastReposition = Date.now();
+  this.repump_(seconds);
+};
+
+// Restart demuxing from the cue at/before `seconds` — the shared tail of a
+// seek and of an in-place audio switch (which must refill the audio buffer
+// from the playhead, since the pump reads up to a minute ahead).
+MkvEngine.prototype.repump_ = function (seconds) {
+  var ms = Math.max(0, seconds * 1000);
   this.generation++;
   for (var k in this.lanes) {
     var lane = this.lanes[k];
@@ -916,8 +923,63 @@ MkvEngine.prototype.reposition = function (seconds) {
     lane.pendingSinceMs = null;
     lane.timeline.reset();
   }
-  this.log('mkvengine: reposition ' + Math.round(seconds) + 's');
+  this.log('mkvengine: repump ' + Math.round(seconds) + 's');
   this.pump_(this.offsetForMs_(ms));
+};
+
+// Switch the audio track IN PLACE — no reload. The demuxer already parses
+// every track's blocks; the lane is re-pointed at the new track (changeType
+// when the codec differs), the old track's not-yet-played audio is dropped,
+// and a repump from the playhead refills it. Video re-appends identical data
+// over itself, which MSE replaces without a visible seam; the audio gap is
+// the refill time — sub-second on a LAN.
+MkvEngine.prototype.setAudioTrack = function (typeIndex) {
+  if (this.dead) return;
+  var audioSeen = 0, newTrack = null;
+  for (var i = 0; i < this.demux.tracks.length; i++) {
+    var t = this.demux.tracks[i];
+    if (t.type !== 2) continue;
+    if (audioSeen === (typeIndex || 0)) { newTrack = t; break; }
+    audioSeen++;
+  }
+  if (!newTrack) { this.log('mkvengine: no audio track #' + typeIndex); return; }
+  var oldNum = null, lane = null;
+  for (var k in this.lanes) {
+    if (this.lanes[k].track.type === 2) { oldNum = k; lane = this.lanes[k]; break; }
+  }
+  if (!lane) return;
+  if (String(newTrack.number) === String(oldNum)) return;
+  var timescale = Math.round(newTrack.audio.sampleRate);
+  var muxer = new Fmp4Muxer(newTrack, timescale);
+  var codec = muxer.codecString();
+  if (!codec) { this.fatal_('unsupported codec ' + newTrack.codecId); return; }
+  var mime = muxer.contentType();
+  if (!MediaSource.isTypeSupported(mime)) {
+    this.fatal_('this device cannot decode ' + codec);
+    return;
+  }
+  var oldMime = lane.muxer.contentType();
+  try {
+    if (lane.sb.updating) lane.sb.abort();
+    if (mime !== oldMime) lane.sb.changeType(mime);
+    // Drop the old track's not-yet-played audio so the new track is HEARD
+    // now, not a read-ahead minute from now.
+    var now = this.getTime() || 0;
+    lane.sb.remove(Math.max(0, now - 0.25), Infinity);
+  } catch (e) { this.fatal_('audio switch: ' + e); return; }
+  delete this.lanes[oldNum];
+  lane.track = newTrack;
+  lane.muxer = muxer;
+  lane.timeline = new MkvTrackTimeline(newTrack, timescale);
+  lane.queue = [];
+  lane.pending = [];
+  lane.pendingSinceMs = null;
+  lane.initSent = false;          // deferred init: rebuilt from the new
+  lane.initBytes = null;          // track's first frame (Dolby needs it)
+  this.lanes[newTrack.number] = lane;
+  this.audioTypeIndex = typeIndex || 0;
+  this.log('mkvengine: audio -> track ' + newTrack.number + ' (' + mime + ')');
+  this.repump_(this.getTime() || 0);
 };
 
 MkvEngine.prototype.pump_ = async function (startOffset) {
