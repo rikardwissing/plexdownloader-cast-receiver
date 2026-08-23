@@ -479,9 +479,14 @@ Fmp4Muxer.prototype.sampleEntry_ = function () {
     var config = mkvBox(isAvc ? 'avcC' : 'hvcC', t.codecPrivate);
     return mkvBox(isAvc ? 'avc1' : 'hvc1', body, config);
   }
-  // Audio: the mp4a+esds form for everything — including AC-3/E-AC-3 via
-  // objectTypeIndication (0xA5/0xA6), the exact shape Plex writes and this
-  // platform measurably accepts.
+  // Audio. AAC rides mp4a+esds (proven in the browser test). AC-3/E-AC-3
+  // ride the CANONICAL ac-3/ec-3 sample entries with dac3/dec3 parsed from
+  // the first real frame — the field test showed this platform's demuxer
+  // rejecting a hand-rolled esds form at init time, and the canonical form
+  // is what ffmpeg writes and every demuxer accepts.
+  if (this.track.codecId === 'A_AC3' || this.track.codecId === 'A_EAC3') {
+    return this.dolbySampleEntry_();
+  }
   var a = [];
   for (var j = 0; j < 6; j++) a.push(0);
   mkvWriteU16(a, 1);                                   // data_reference_index
@@ -505,6 +510,66 @@ Fmp4Muxer.prototype.sampleEntry_ = function () {
   es.push(6, 1, 2);                                    // SLConfig
   var esds = mkvFull('esds', 0, 0, [3, es.length].concat(es));
   return mkvBox('mp4a', a, esds);
+};
+
+// The audio-specific config boxes Dolby entries need, read from the first
+// frame's own syncframe header (kept by the caller via noteFirstFrame).
+Fmp4Muxer.prototype.dolbySampleEntry_ = function () {
+  var t = this.track;
+  var a = [];
+  for (var j = 0; j < 6; j++) a.push(0);
+  mkvWriteU16(a, 1);                                   // data_reference_index
+  mkvWriteU32(a, 0); mkvWriteU32(a, 0);                // reserved
+  mkvWriteU16(a, t.audio.channels);
+  mkvWriteU16(a, 16);                                  // samplesize
+  mkvWriteU32(a, 0);                                   // pre_defined/reserved
+  mkvWriteU32(a, Math.round(t.audio.sampleRate) << 16 >>> 0);
+  var frame = this.firstFrame_ || new Uint8Array(0);
+  if (t.codecId === 'A_AC3') {
+    // dac3: fscod(2) bsid(5) bsmod(3) acmod(3) lfeon(1) bit_rate_code(5) +5 reserved
+    var fscod = 0, bsid = 8, bsmod = 0, acmod = 2, lfeon = 0, brc = 0;
+    if (frame.length >= 7 && frame[0] === 0x0B && frame[1] === 0x77) {
+      fscod = frame[4] >> 6;
+      brc = (frame[4] & 0x3F) >> 1;
+      bsid = frame[5] >> 3;
+      bsmod = frame[5] & 0x07;
+      acmod = frame[6] >> 5;
+      // lfeon's position depends on acmod's optional fields; a heuristic here
+      // is worse than the channel count we already know.
+      lfeon = t.audio.channels === 6 ? 1 : 0;
+    }
+    var v = (fscod << 22) | (bsid << 17) | (bsmod << 14) | (acmod << 11) |
+            (lfeon << 10) | (brc << 5);
+    return mkvBox('ac-3', a, mkvBox('dac3', [(v >>> 16) & 255, (v >>> 8) & 255, v & 255]));
+  }
+  // dec3: data_rate(13) num_ind_sub-1(3), then fscod(2) bsid(5) reserved(1)
+  // asvc(1) bsmod(3) acmod(3) lfeon(1) reserved(3) num_dep_sub(4) reserved(1)
+  var efscod = 0, ebsid = 16, eacmod = 2, elfeon = 0;
+  if (frame.length >= 6 && frame[0] === 0x0B && frame[1] === 0x77) {
+    efscod = frame[4] >> 6;
+    eacmod = (frame[4] >> 1) & 0x07;
+    elfeon = frame[4] & 0x01;
+    ebsid = frame[5] >> 3;
+  }
+  var dataRate = 640;
+  var d = [];
+  mkvWriteU16(d, ((dataRate & 0x1FFF) << 3) | 0);      // data_rate + (num_ind_sub-1)=0
+  var sub = (efscod << 14) | (ebsid << 9) | (0 << 8) | (0 << 7) |
+            (0 << 4 /* bsmod */) | (eacmod << 1) | elfeon;
+  mkvWriteU16(d, sub << 0);
+  d.push(0);                                           // num_dep_sub(4)+reserved
+  return mkvBox('ec-3', a, mkvBox('dec3', d));
+};
+
+// Remember the first frame of the track — the Dolby config boxes are read
+// from its syncframe header, so the init segment must wait for it.
+Fmp4Muxer.prototype.noteFirstFrame = function (data) {
+  if (!this.firstFrame_) this.firstFrame_ = data;
+};
+
+Fmp4Muxer.prototype.needsFirstFrame = function () {
+  return (this.track.codecId === 'A_AC3' || this.track.codecId === 'A_EAC3') &&
+         !this.firstFrame_;
 };
 
 Fmp4Muxer.prototype.initSegment = function (durationMs) {
@@ -779,12 +844,25 @@ MkvEngine.prototype.start_ = async function () {
                    sb: sb, queue: [], pending: [], pendingSinceMs: null, track: track };
       (function (self2, lane2) {
         sb.addEventListener('updateend', function () { self2.drain_(lane2); });
-        sb.addEventListener('error', function () { self2.fatal_('sourcebuffer error (' + lane2.track.codecId + ')'); });
+        sb.addEventListener('error', function () {
+          var hex = '';
+          try {
+            var init = lane2.initBytes || new Uint8Array(0);
+            for (var h = 0; h < Math.min(init.length, 96); h++) {
+              hex += (init[h] < 16 ? '0' : '') + init[h].toString(16);
+            }
+          } catch (e2) {}
+          self2.fatal_('sourcebuffer error (' + lane2.track.codecId + ') init=' + hex);
+        });
       })(this, lane);
       this.lanes[track.number] = lane;
       this.log('mkvengine: lane ' + track.number + ' ' + mime);
-      lane.queue.push(muxer.initSegment(this.demux.durationMs()));
-      this.drain_(lane);
+      if (!muxer.needsFirstFrame()) {
+        lane.initBytes = muxer.initSegment(this.demux.durationMs());
+        lane.queue.push(lane.initBytes);
+        lane.initSent = true;
+        this.drain_(lane);
+      }
     }
     try { this.mediaSource.duration = this.demux.durationMs() / 1000; } catch (e) {}
     var at = Math.max(this.getTime() * 1000 || 0, this.startAt * 1000);
@@ -871,6 +949,13 @@ MkvEngine.prototype.pump_ = async function (startOffset) {
       consumed = this.demux.parseClusters(chunk, base, function (trackNum, raw) {
         var lane = self.lanes[trackNum];
         if (!lane) return;
+        if (!lane.initSent) {
+          // Dolby lanes build their init from the first frame's own header.
+          lane.muxer.noteFirstFrame(raw.data);
+          lane.initBytes = lane.muxer.initSegment(self.demux.durationMs());
+          lane.queue.unshift(lane.initBytes);
+          lane.initSent = true;
+        }
         var sample = lane.timeline.convert(raw);
         lane.pending.push(sample);
         if (lane.pendingSinceMs == null) lane.pendingSinceMs = raw.ptsMs;
