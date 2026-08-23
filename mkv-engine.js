@@ -19,7 +19,9 @@
 // ffprobe frame-exact; playback proven in Chromium via MSE — load, seek,
 // natural end). MkvEngine is the browser pump on top.
 //
-// NOT ES5: the pump uses async/await (Chrome 55+), so this file is for the
+// ES5 on purpose (2026-08-24 pass): the pump is promise-chained rather than
+// async/await, and the default fetcher falls back to XHR — the same file
+// runs on the 2017 webOS parser AND the
 // CAST receiver (Chrome 92) and modern browsers only. Wiring it into the LAN
 // page (2017 webOS parses the whole script or dies) needs an ES5 transform
 // or a conditional loader first — do not add it to tv.html as-is.
@@ -739,20 +741,45 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.url = url;
   this.audioTypeIndex = audioTypeIndex || 0;
   this.fetcher = opts.fetcher || function (start, end, signal) {
-    return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end },
-                        signal: signal })
-      .then(function (r) {
-        if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
-        return r.arrayBuffer().then(function (buf) {
-          // A 200 is the WHOLE file from a server that ignored the Range
-          // header. Slice it to the window asked for, or the pump labels
-          // bytes with offsets they don't have and demuxes garbage.
-          if (r.status === 200 && buf.byteLength > end - start + 1) {
-            return buf.slice(start, end + 1);
-          }
-          return buf;
+    if (typeof fetch === 'function') {
+      return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end },
+                          signal: signal })
+        .then(function (r) {
+          if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
+          return r.arrayBuffer().then(function (buf) {
+            // A 200 is the WHOLE file from a server that ignored the Range
+            // header. Slice it to the window asked for, or the pump labels
+            // bytes with offsets they don't have and demuxes garbage.
+            if (r.status === 200 && buf.byteLength > end - start + 1) {
+              return buf.slice(start, end + 1);
+            }
+            return buf;
+          });
         });
-      });
+    }
+    // 2017 TVs have no fetch — XHR does the same job, with its own timeout
+    // (no AbortController there either, so xhr.timeout IS the timeout).
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.responseType = 'arraybuffer';
+      xhr.setRequestHeader('Range', 'bytes=' + start + '-' + end);
+      xhr.timeout = 15000;
+      xhr.onload = function () {
+        if (xhr.status !== 206 && xhr.status !== 200) {
+          reject(new Error('HTTP ' + xhr.status));
+          return;
+        }
+        var buf = xhr.response;
+        if (xhr.status === 200 && buf && buf.byteLength > end - start + 1) {
+          buf = buf.slice(start, end + 1);
+        }
+        resolve(buf);
+      };
+      xhr.onerror = function () { reject(new Error('network error')); };
+      xhr.ontimeout = function () { reject(new Error('timeout')); };
+      xhr.send();
+    });
   };
   this.fetchTimeoutMs = opts.fetchTimeoutMs || 15000;
   this.inflightAbort = null;
@@ -820,64 +847,83 @@ MkvEngine.prototype.abortInflight_ = function () {
 //  - RETRIES on a fresh connection, which doubles as the workaround for a
 //    server that throttles long-lived ones (the same lesson the chunked
 //    download engine learned from this PMS).
-MkvEngine.prototype.fetchRange_ = async function (start, end, gen) {
+MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
+  var self = this;
   var lastErr = null;
-  for (var attempt = 1; attempt <= 3; attempt++) {
-    if (this.dead || (gen != null && gen !== this.generation)) {
-      throw lastErr || new Error('superseded');
+  function attemptFetch(attempt) {
+    if (self.dead || (gen != null && gen !== self.generation)) {
+      return Promise.reject(lastErr || new Error('superseded'));
     }
     var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    this.inflightAbort = ctrl;
+    self.inflightAbort = ctrl;
     var timedOut = false;
     var timer = ctrl ? setTimeout(function () {
       timedOut = true;
       try { ctrl.abort(); } catch (e) {}
-    }, this.fetchTimeoutMs) : null;
+    }, self.fetchTimeoutMs) : null;
     var t0 = Date.now();
-    try {
-      var buf = await this.fetcher(start, end, ctrl ? ctrl.signal : undefined);
-      if (timer) clearTimeout(timer);
-      this.inflightAbort = null;
-      this.lastFetchDoneAt = Date.now();
-      var took = Date.now() - t0;
-      if (took > 5000) this.log('mkvengine: slow fetch @' + start + ' took ' + took + 'ms');
-      return buf;
-    } catch (e) {
-      if (timer) clearTimeout(timer);
-      this.inflightAbort = null;
-      this.lastFetchDoneAt = Date.now();
-      lastErr = e;
-      // Aborted because we were superseded or torn down — not an error.
-      if (this.dead || (gen != null && gen !== this.generation)) throw e;
-      this.log('mkvengine: fetch @' + start + ' attempt ' + attempt + ' failed after ' +
-               (Date.now() - t0) + 'ms: ' + (timedOut ? 'timeout' : e));
-      await this.sleep_(500 * attempt);
-    }
+    return Promise.resolve(self.fetcher(start, end, ctrl ? ctrl.signal : undefined))
+      .then(function (buf) {
+        if (timer) clearTimeout(timer);
+        self.inflightAbort = null;
+        self.lastFetchDoneAt = Date.now();
+        var took = Date.now() - t0;
+        if (took > 5000) self.log('mkvengine: slow fetch @' + start + ' took ' + took + 'ms');
+        return buf;
+      }, function (e) {
+        if (timer) clearTimeout(timer);
+        self.inflightAbort = null;
+        self.lastFetchDoneAt = Date.now();
+        lastErr = e;
+        // Aborted because we were superseded or torn down — not an error.
+        if (self.dead || (gen != null && gen !== self.generation)) throw e;
+        self.log('mkvengine: fetch @' + start + ' attempt ' + attempt + ' failed after ' +
+                 (Date.now() - t0) + 'ms: ' + (timedOut ? 'timeout' : e));
+        if (attempt >= 3) throw lastErr;
+        return self.sleep_(500 * attempt).then(function () {
+          return attemptFetch(attempt + 1);
+        });
+      });
   }
-  throw lastErr || new Error('fetch failed');
+  return attemptFetch(1);
 };
 
-MkvEngine.prototype.start_ = async function () {
-  try {
-    // Grow the header window until Tracks and the first Cluster are visible.
-    var window_ = 256 * 1024;
-    var head = null;
-    for (;;) {
-      head = new Uint8Array(await this.fetchRange_(0, window_ - 1, null));
+MkvEngine.prototype.start_ = function () {
+  var self = this;
+  // Grow the header window until Tracks and the first Cluster are visible.
+  function growHeader(window_) {
+    return self.fetchRange_(0, window_ - 1, null).then(function (buf) {
+      var head = new Uint8Array(buf);
       var ok = false;
-      try { ok = this.demux.parseHeader(head); } catch (e) { this.fatal_(e); return; }
-      if (ok) break;
-      if (window_ >= 8 * 1024 * 1024) { this.fatal_('no tracks in first 8MB'); return; }
-      window_ *= 2;
-    }
-    if (this.demux.cuesOffset != null && !this.demux.cues.length) {
-      try {
-        var cuesBytes = new Uint8Array(
-          await this.fetchRange_(this.demux.cuesOffset,
-                                 this.demux.cuesOffset + 512 * 1024 - 1, null));
-        this.demux.parseCues(cuesBytes);
-      } catch (e) {}
-    }
+      try { ok = self.demux.parseHeader(head); } catch (e) { self.fatal_(e); return false; }
+      if (ok) return true;
+      if (window_ >= 8 * 1024 * 1024) { self.fatal_('no tracks in first 8MB'); return false; }
+      return growHeader(window_ * 2);
+    });
+  }
+  // Cues are an optimization (cue-less files repump from the first cluster),
+  // so a failed fetch or parse is survivable, never fatal.
+  function fetchCues() {
+    if (self.demux.cuesOffset == null || self.demux.cues.length) return Promise.resolve();
+    return self.fetchRange_(self.demux.cuesOffset,
+                            self.demux.cuesOffset + 512 * 1024 - 1, null)
+      .then(function (buf) {
+        try { self.demux.parseCues(new Uint8Array(buf)); } catch (e) {}
+      }, function () {});
+  }
+  growHeader(256 * 1024).then(function (parsed) {
+    if (!parsed || self.dead) return;
+    return fetchCues().then(function () {
+      if (self.dead) return;
+      self.openLanes_();
+    });
+  }).then(null, function (e) { self.fatal_('start: ' + e); });
+};
+
+// The synchronous back half of start_: pick tracks, open a SourceBuffer lane
+// for each, and kick the first pump.
+MkvEngine.prototype.openLanes_ = function () {
+  try {
     // Choose tracks: the video track, and the audioTypeIndex-th audio track.
     var video = null, audio = null, audioSeen = 0;
     for (var i = 0; i < this.demux.tracks.length; i++) {
@@ -1121,7 +1167,7 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   this.repump_(this.getTime() || 0);
 };
 
-MkvEngine.prototype.pump_ = async function (startOffset) {
+MkvEngine.prototype.pump_ = function (startOffset) {
   var gen = ++this.generation;
   var offset = startOffset;
   var carry = null;               // partial trailing cluster from last window
@@ -1129,88 +1175,104 @@ MkvEngine.prototype.pump_ = async function (startOffset) {
   var WINDOW = 2 * 1024 * 1024;
   var self = this;
   var sawEnd = false;
-  while (!this.dead && gen === this.generation) {
+
+  // The demux callback, shared by every window this run parses.
+  function onBlock(trackNum, raw) {
+    var lane = self.lanes[trackNum];
+    if (!lane) return;
+    if (!lane.initSent) {
+      // Dolby lanes build their init from the first frame's own header.
+      lane.muxer.noteFirstFrame(raw.data);
+      lane.initBytes = lane.muxer.initSegment(self.demux.durationMs());
+      lane.queue.unshift(lane.initBytes);
+      lane.initSent = true;
+    }
+    var sample = lane.timeline.convert(raw);
+    lane.pending.push(sample);
+    if (lane.pendingSinceMs == null) lane.pendingSinceMs = raw.ptsMs;
+    if (raw.ptsMs > self.appendedMs) self.appendedMs = raw.ptsMs;
+    // ~1 second per fragment, and video fragments begin on keyframes when
+    // the source has them (cleaner random access for the element).
+    if (raw.ptsMs - lane.pendingSinceMs >= 1000) self.flushLane_(lane);
+  }
+
+  // End of the run: flush the last partial fragments, then endOfStream once
+  // every lane has drained.
+  function finish() {
+    if (self.dead || gen !== self.generation) return;
+    for (var k2 in self.lanes) self.flushLane_(self.lanes[k2]);
+    var wait = function () {
+      if (self.dead || gen !== self.generation) return;
+      for (var k3 in self.lanes) {
+        var lane = self.lanes[k3];
+        if (lane.queue.length || (lane.sb && lane.sb.updating)) { setTimeout(wait, 200); return; }
+      }
+      try { self.mediaSource.endOfStream(); } catch (e) {}
+    };
+    wait();
+  }
+
+  // One loop iteration of the old async pump, promise-chained: each window
+  // schedules the next, so the stack never grows.
+  function step() {
+    if (self.dead || gen !== self.generation) return;
     // Backpressure: a minute of media ahead of the playhead is plenty.
-    var nowMs = (this.getTime() || 0) * 1000;
-    if (this.appendedMs - nowMs > 60000) { await this.sleep_(1000); continue; }
-    var bytes;
-    try {
-      bytes = new Uint8Array(await this.fetchRange_(offset, offset + WINDOW - 1, gen));
-    } catch (e) {
-      // Superseded mid-fetch (a seek, an audio switch, a teardown): the
-      // abort is ours, not a failure.
-      if (this.dead || gen !== this.generation) return;
-      this.fatal_('fetch@' + offset + ': ' + e); return;
+    var nowMs = (self.getTime() || 0) * 1000;
+    if (self.appendedMs - nowMs > 60000) {
+      self.sleep_(1000).then(step);
+      return;
     }
-    if (gen !== this.generation || this.dead) return;
-    if (!bytes.length) sawEnd = true;
-    var chunk, base;
-    if (carry && carry.length) {
-      chunk = new Uint8Array(carry.length + bytes.length);
-      chunk.set(carry, 0); chunk.set(bytes, carry.length);
-      base = carryBase;
-    } else { chunk = bytes; base = offset; }
-    var consumed = 0;
-    try {
-      consumed = this.demux.parseClusters(chunk, base, function (trackNum, raw) {
-        var lane = self.lanes[trackNum];
-        if (!lane) return;
-        if (!lane.initSent) {
-          // Dolby lanes build their init from the first frame's own header.
-          lane.muxer.noteFirstFrame(raw.data);
-          lane.initBytes = lane.muxer.initSegment(self.demux.durationMs());
-          lane.queue.unshift(lane.initBytes);
-          lane.initSent = true;
-        }
-        var sample = lane.timeline.convert(raw);
-        lane.pending.push(sample);
-        if (lane.pendingSinceMs == null) lane.pendingSinceMs = raw.ptsMs;
-        if (raw.ptsMs > self.appendedMs) self.appendedMs = raw.ptsMs;
-        // ~1 second per fragment, and video fragments begin on keyframes when
-        // the source has them (cleaner random access for the element).
-        if (raw.ptsMs - lane.pendingSinceMs >= 1000) self.flushLane_(lane);
-      });
-    } catch (e) { this.fatal_('demux@' + base + ': ' + e); return; }
-    if (bytes.length < WINDOW) sawEnd = true;
-    if (consumed === 0 && sawEnd) break;
-    if (consumed === 0 && chunk.length > 32 * 1024 * 1024) {
-      this.fatal_('cluster larger than 32MB'); return;
-    }
-    if (consumed > 0) {
-      carry = chunk.subarray(consumed);
-      carryBase = base + consumed;
-      offset = carryBase + carry.length;
-    } else {
-      carry = chunk;
-      carryBase = base;
-      offset = base + chunk.length;
-    }
-    if (sawEnd && (!carry || !carry.length)) break;
-    if (sawEnd) { /* one more parse attempt happened; nothing left to fetch */ break; }
-    // Opportunistic eviction keeps quota honest on long plays.
-    if (++this.evictCountdown >= 8) {
-      this.evictCountdown = 0;
-      var behind = (this.getTime() || 0) - 40;
-      if (behind > 0) {
-        for (var k in this.lanes) {
-          var sb = this.lanes[k].sb;
-          if (sb && !sb.updating) { try { sb.remove(0, behind); } catch (e2) {} }
+    self.fetchRange_(offset, offset + WINDOW - 1, gen).then(function (buf) {
+      if (gen !== self.generation || self.dead) return;
+      var bytes = new Uint8Array(buf);
+      if (!bytes.length) sawEnd = true;
+      var chunk, base;
+      if (carry && carry.length) {
+        chunk = new Uint8Array(carry.length + bytes.length);
+        chunk.set(carry, 0); chunk.set(bytes, carry.length);
+        base = carryBase;
+      } else { chunk = bytes; base = offset; }
+      var consumed = 0;
+      try {
+        consumed = self.demux.parseClusters(chunk, base, onBlock);
+      } catch (e) { self.fatal_('demux@' + base + ': ' + e); return; }
+      if (bytes.length < WINDOW) sawEnd = true;
+      if (consumed === 0 && sawEnd) { finish(); return; }
+      if (consumed === 0 && chunk.length > 32 * 1024 * 1024) {
+        self.fatal_('cluster larger than 32MB'); return;
+      }
+      if (consumed > 0) {
+        carry = chunk.subarray(consumed);
+        carryBase = base + consumed;
+        offset = carryBase + carry.length;
+      } else {
+        carry = chunk;
+        carryBase = base;
+        offset = base + chunk.length;
+      }
+      // sawEnd: the trailing parse attempt above already ran; nothing left
+      // to fetch either way.
+      if (sawEnd) { finish(); return; }
+      // Opportunistic eviction keeps quota honest on long plays.
+      if (++self.evictCountdown >= 8) {
+        self.evictCountdown = 0;
+        var behind = (self.getTime() || 0) - 40;
+        if (behind > 0) {
+          for (var k in self.lanes) {
+            var sb = self.lanes[k].sb;
+            if (sb && !sb.updating) { try { sb.remove(0, behind); } catch (e2) {} }
+          }
         }
       }
-    }
+      step();
+    }, function (e) {
+      // Superseded mid-fetch (a seek, an audio switch, a teardown): the
+      // abort is ours, not a failure.
+      if (self.dead || gen !== self.generation) return;
+      self.fatal_('fetch@' + offset + ': ' + e);
+    });
   }
-  if (this.dead || gen !== this.generation) return;
-  for (var k2 in this.lanes) this.flushLane_(this.lanes[k2]);
-  var self3 = this;
-  var wait = function () {
-    if (self3.dead || gen !== self3.generation) return;
-    for (var k3 in self3.lanes) {
-      var lane = self3.lanes[k3];
-      if (lane.queue.length || (lane.sb && lane.sb.updating)) { setTimeout(wait, 200); return; }
-    }
-    try { self3.mediaSource.endOfStream(); } catch (e) {}
-  };
-  wait();
+  step();
 };
 
 // ------------------------------------------------------------- exports
