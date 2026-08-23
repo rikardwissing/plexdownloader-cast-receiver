@@ -738,13 +738,16 @@ function MkvEngine(url, audioTypeIndex, opts) {
   var self = this;
   this.url = url;
   this.audioTypeIndex = audioTypeIndex || 0;
-  this.fetcher = opts.fetcher || function (start, end) {
-    return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end } })
+  this.fetcher = opts.fetcher || function (start, end, signal) {
+    return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end },
+                        signal: signal })
       .then(function (r) {
         if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
         return r.arrayBuffer();
       });
   };
+  this.fetchTimeoutMs = opts.fetchTimeoutMs || 15000;
+  this.inflightAbort = null;
   this.getTime = opts.getTime || function () { return 0; };
   this.log = opts.log || function () {};
   this.startAt = opts.startAt || 0;
@@ -767,6 +770,7 @@ function MkvEngine(url, audioTypeIndex, opts) {
 MkvEngine.prototype.destroy = function () {
   this.dead = true;
   this.generation++;
+  this.abortInflight_();
   try {
     if (this.mediaSource.readyState === 'open') {
       for (var k in this.lanes) {
@@ -788,13 +792,66 @@ MkvEngine.prototype.sleep_ = function (ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
 };
 
+MkvEngine.prototype.abortInflight_ = function () {
+  if (!this.inflightAbort) return;
+  try { this.inflightAbort.abort(); } catch (e) {}
+  this.inflightAbort = null;
+};
+
+// Every byte-range request goes through here, and the discipline IS the fix
+// for the field stall of 2026-08-23. Three rules:
+//  - a TIMEOUT: fetch() waits forever by default, so a connection the server
+//    black-holes was an infinite spinner with no error and no retry;
+//  - an ABORT handle: destroy and repump must RELEASE the connection. Hung
+//    fetches from stopped casts accumulated until the page's per-host
+//    connection pool (6 in Chromium) was exhausted and every NEW cast starved
+//    at its first fetch — confirmed by "works again after exiting the
+//    receiver", which resets the pool;
+//  - RETRIES on a fresh connection, which doubles as the workaround for a
+//    server that throttles long-lived ones (the same lesson the chunked
+//    download engine learned from this PMS).
+MkvEngine.prototype.fetchRange_ = async function (start, end, gen) {
+  var lastErr = null;
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    if (this.dead || (gen != null && gen !== this.generation)) {
+      throw lastErr || new Error('superseded');
+    }
+    var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    this.inflightAbort = ctrl;
+    var timedOut = false;
+    var timer = ctrl ? setTimeout(function () {
+      timedOut = true;
+      try { ctrl.abort(); } catch (e) {}
+    }, this.fetchTimeoutMs) : null;
+    var t0 = Date.now();
+    try {
+      var buf = await this.fetcher(start, end, ctrl ? ctrl.signal : undefined);
+      if (timer) clearTimeout(timer);
+      this.inflightAbort = null;
+      var took = Date.now() - t0;
+      if (took > 5000) this.log('mkvengine: slow fetch @' + start + ' took ' + took + 'ms');
+      return buf;
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      this.inflightAbort = null;
+      lastErr = e;
+      // Aborted because we were superseded or torn down — not an error.
+      if (this.dead || (gen != null && gen !== this.generation)) throw e;
+      this.log('mkvengine: fetch @' + start + ' attempt ' + attempt + ' failed after ' +
+               (Date.now() - t0) + 'ms: ' + (timedOut ? 'timeout' : e));
+      await this.sleep_(500 * attempt);
+    }
+  }
+  throw lastErr || new Error('fetch failed');
+};
+
 MkvEngine.prototype.start_ = async function () {
   try {
     // Grow the header window until Tracks and the first Cluster are visible.
     var window_ = 256 * 1024;
     var head = null;
     for (;;) {
-      head = new Uint8Array(await this.fetcher(0, window_ - 1));
+      head = new Uint8Array(await this.fetchRange_(0, window_ - 1, null));
       var ok = false;
       try { ok = this.demux.parseHeader(head); } catch (e) { this.fatal_(e); return; }
       if (ok) break;
@@ -804,7 +861,8 @@ MkvEngine.prototype.start_ = async function () {
     if (this.demux.cuesOffset != null && !this.demux.cues.length) {
       try {
         var cuesBytes = new Uint8Array(
-          await this.fetcher(this.demux.cuesOffset, this.demux.cuesOffset + 512 * 1024 - 1));
+          await this.fetchRange_(this.demux.cuesOffset,
+                                 this.demux.cuesOffset + 512 * 1024 - 1, null));
         this.demux.parseCues(cuesBytes);
       } catch (e) {}
     }
@@ -917,6 +975,9 @@ MkvEngine.prototype.reposition = function (seconds) {
 MkvEngine.prototype.repump_ = function (seconds) {
   var ms = Math.max(0, seconds * 1000);
   this.generation++;
+  // Free the abandoned pump's connection NOW — a seek must not queue its
+  // first fetch behind a read the server may have stopped answering.
+  this.abortInflight_();
   for (var k in this.lanes) {
     var lane = this.lanes[k];
     lane.pending = [];
@@ -996,8 +1057,13 @@ MkvEngine.prototype.pump_ = async function (startOffset) {
     if (this.appendedMs - nowMs > 60000) { await this.sleep_(1000); continue; }
     var bytes;
     try {
-      bytes = new Uint8Array(await this.fetcher(offset, offset + WINDOW - 1));
-    } catch (e) { this.fatal_('fetch@' + offset + ': ' + e); return; }
+      bytes = new Uint8Array(await this.fetchRange_(offset, offset + WINDOW - 1, gen));
+    } catch (e) {
+      // Superseded mid-fetch (a seek, an audio switch, a teardown): the
+      // abort is ours, not a failure.
+      if (this.dead || gen !== this.generation) return;
+      this.fatal_('fetch@' + offset + ': ' + e); return;
+    }
     if (gen !== this.generation || this.dead) return;
     if (!bytes.length) sawEnd = true;
     var chunk, base;
