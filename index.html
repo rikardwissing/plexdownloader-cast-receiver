@@ -146,7 +146,7 @@
   <!-- Version badge lives INSIDE the idle screen so it hides with it —
        position:fixed still pins it to the corner while idle shows. -->
   <div style="position:fixed;right:10px;bottom:8px;font-size:1.2vh;letter-spacing:0.05em;
-              color:rgba(244,247,255,0.25);pointer-events:none">2026-08-23.12</div>
+              color:rgba(244,247,255,0.25);pointer-events:none">2026-08-23.13</div>
   <img class="mark" src="icon.png" alt="">
   <p class="wordmark">Portage</p>
   <h1 class="headline">Ready to cast</h1>
@@ -169,21 +169,13 @@
 </div>
 
 <script>
-// Before the Cast framework wraps MediaSource: relabel the audio buffer Shaka
-// mislabels. Shaka 4.16 demuxes a muxed fMP4 variant into separate buffers -
-// exactly the topology this platform accepts - but labels the AUDIO buffer
-// with the variant's container: video/mp4; codecs="ec-3". Lax desktop Chrome
-// takes audio codecs under video/mp4; this platform throws NotSupportedError
-// (measured), while accepting the identical codec under audio/mp4 (measured).
-// Only the exact pattern is touched: a video/mp4 type whose entire codec list
-// is one audio codec, unsupported as-is and supported relabeled.
-window.__sbRelabels = [];
-// While a Dolby-split stream load is active (set by the LOAD interceptor),
-// a LONE video codec answers "unsupported" so Shaka routes the video buffer
-// through the transmuxer path — its muxed payload needs the split even
-// though the codec itself is supported. Real codec strings end to end: the
-// marker approach died in Shaka's codec normalizer (avc1.42E01E.pdl ->
-// avc1.2a0NaN, measured).
+// Before the Cast framework wraps MediaSource. While a Dolby-split stream
+// load is active (set by the LOAD interceptor), a LONE video codec answers
+// "unsupported" so Shaka routes the video buffer through the fMP4-splitter
+// transmuxer (fmp4-split.js) — its muxed payload needs the split even though
+// the codec itself is supported. Real codec strings end to end: markers in
+// codec strings die in Shaka's normalizer (avc1.42E01E.pdl -> avc1.2a0NaN,
+// measured 2026-08-23).
 window.__dolbySplitActive = false;
 (function () {
   if (!window.MediaSource) return;
@@ -196,31 +188,14 @@ window.__dolbySplitActive = false;
     return originalITS(type);
   };
 })();
-(function () {
-  if (!window.MediaSource || !MediaSource.prototype.addSourceBuffer) return;
-  var original = MediaSource.prototype.addSourceBuffer;
-  var pureAudio = /^video\/mp4;\s*codecs="(ec-3|ac-3|mp4a\.[0-9a-fA-F.]+|flac|opus)"$/;
-  MediaSource.prototype.addSourceBuffer = function (type) {
-    var t = String(type || '');
-    if (pureAudio.test(t) && !MediaSource.isTypeSupported(t)) {
-      var fixed = t.replace(/^video\//, 'audio/');
-      if (MediaSource.isTypeSupported(fixed)) {
-        window.__sbRelabels.push(t + ' -> ' + fixed);
-        return original.call(this, fixed);
-      }
-    }
-    return original.call(this, type);
-  };
-})();
 </script>
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-<script src="mp4box.all.min.js?v=2026-08-23.12"></script>
+<script src="mp4box.all.min.js?v=2026-08-23.13"></script>
 <!-- The MSE engine, shared verbatim with the WebRTC and LAN receivers and
      copied here by scripts/build-hosted-receiver.sh in the app repo. Must load
      BEFORE receiver.js, which hands it its host hooks the moment it runs. -->
-<script src="tv-mse.js?v=2026-08-23.12"></script>
-<script src="hls-fmp4.js?v=2026-08-23.12"></script>
-<script src="fmp4-split.js?v=2026-08-23.12"></script>
-<script src="receiver.js?v=2026-08-23.12"></script>
+<script src="tv-mse.js?v=2026-08-23.13"></script>
+<script src="fmp4-split.js?v=2026-08-23.13"></script>
+<script src="receiver.js?v=2026-08-23.13"></script>
 </body>
 </html>

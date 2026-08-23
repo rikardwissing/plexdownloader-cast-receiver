@@ -69,12 +69,10 @@
         // so it cannot gate anything.
         answer = codecs.length > 0 && (hasDolby || hasVideo);
       }
-      log('fmp4split: isSupported(' + mimeType + ', ' + contentType + ') = ' + answer);
       return answer;
     }
 
     convertCodecs(contentType, mimeType) {
-      log('fmp4split: convertCodecs(' + contentType + ', ' + mimeType + ')');
       const codecs = codecList(mimeType);
       let picked = null;
       for (let i = 0; i < codecs.length; i++) {
@@ -135,12 +133,6 @@
     }
 
     async transmux(data, stream, reference, duration, contentType) {
-      if (reference == null || !this.loggedMedia_) {
-        this.loggedMedia_ = reference != null;
-        log('fmp4split: transmux ' + contentType +
-            (reference == null ? ' INIT' : ' first media') +
-            ' (' + (data.byteLength || 0) + 'b)');
-      }
       this.contentType_ = contentType;
       let bytes = data instanceof ArrayBuffer
         ? data
