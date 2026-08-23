@@ -422,6 +422,7 @@ if (!PREVIEW) {
       // engine's; subtitles arrive as the sender's sidecar tracks and render
       // natively. Seeks ride the SEEK interceptor into engine.reposition.
       const mkvUrl = media.contentUrl || media.contentId;
+      lastLoad = { url: mkvUrl, media: Object.assign({}, media), custom };
       engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
         getTime: () => playerManager.getCurrentTimeSec() || 0,
         log: slog,
@@ -495,7 +496,14 @@ if (!PREVIEW) {
       context.sendCustomMessage(NS, event.senderId,
                                 { type: 'pong', capabilities: capabilities() });
     } else if (msg.type === 'setAudioTrack' && engine) {
-      engine.setAudioTrack(msg.audioTypeIndex || 0);
+      if (typeof engine.setAudioTrack === 'function') {
+        engine.setAudioTrack(msg.audioTypeIndex || 0);
+      } else if (lastLoad) {
+        // The MkvEngine switches audio the reissue way: reload the same media
+        // at the live position with the new track in customData - the LOAD
+        // interceptor builds a fresh engine around it.
+        reissue({ audioTypeIndex: msg.audioTypeIndex || 0 });
+      }
     }
   });
 
