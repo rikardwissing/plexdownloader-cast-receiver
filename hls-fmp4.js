@@ -20,7 +20,7 @@
 // the element clock equals the declared grid — the same clock the phone and
 // the browser receivers use, so positions survive handoffs.
 
-const HLS_ENGINE_VERSION = '2026-08-23.7';
+const HLS_ENGINE_VERSION = '2026-08-23.8';
 
 function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.masterUrl = masterUrl;
@@ -106,6 +106,26 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
 HlsFmp4Engine.prototype.destroy = function () {
   this.dead = true;
   this.generation++;
+  // Release the hardware decoders NOW, not when GC gets around to it. The
+  // ec-3 SourceBuffer holds the platform's one Dolby decoder, and a new
+  // receiver instance asking for it while a dead one still holds it is the
+  // demux-error-on-immediate-recast pattern (field, 2026-08-23): the engine
+  // used to survive a STOP and idle on the decoder until the next LOAD.
+  try {
+    if (this.mediaSource.readyState === 'open') {
+      for (let i = 0; i < this.buffers.length; i++) {
+        try { this.mediaSource.removeSourceBuffer(this.buffers[i].sb); } catch (e) {}
+      }
+    }
+  } catch (e) {}
+  try {
+    const found = this.hostVideo_();
+    if (found.matched && found.el) {
+      found.el.removeAttribute('src');
+      found.el.load();
+      this.log('hlsengine: released element and decoders');
+    }
+  } catch (e) {}
   if (this.synthTimer) { clearInterval(this.synthTimer); this.synthTimer = null; }
   if (this.paintTimer) { clearInterval(this.paintTimer); this.paintTimer = null; }
   if (this.subDiagTimer) { clearInterval(this.subDiagTimer); this.subDiagTimer = null; }

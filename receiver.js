@@ -437,6 +437,16 @@ if (!PREVIEW) {
     return request;
   });
 
+  // STOP: the engine used to survive this and idle on the platform's Dolby
+  // decoder until the next LOAD - and a dead receiver instance still holding
+  // the decoder is exactly what a freshly launched one trips over (the
+  // demux-error-on-immediate-recast pattern). Release at the moment playback
+  // actually ends.
+  playerManager.setMessageInterceptor(messages.MessageType.STOP, (request) => {
+    teardownEngine();
+    return request;
+  });
+
   // SEEK: CAF moves the media element; the engine must move the demux too.
   playerManager.setMessageInterceptor(messages.MessageType.SEEK, (request) => {
     if (engine && typeof request.currentTime === 'number') {
