@@ -20,7 +20,7 @@
 // the element clock equals the declared grid — the same clock the phone and
 // the browser receivers use, so positions survive handoffs.
 
-const HLS_ENGINE_VERSION = '2026-08-23.6';
+const HLS_ENGINE_VERSION = '2026-08-23.7';
 
 function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.masterUrl = masterUrl;
@@ -273,9 +273,14 @@ HlsFmp4Engine.prototype.refreshSynth_ = async function () {
 };
 
 HlsFmp4Engine.prototype.rebuildSynth_ = function (shift) {
-  let el = null;
-  try { el = this.findMedia && this.findMedia(); } catch (e) {}
+  const found = this.hostVideo_();
+  const el = found.el;
   if (!el) return;
+  if (!found.matched && !this.hostWarned) {
+    this.hostWarned = true;
+    this.log('hlsengine: no video matches our blob src (' + found.count +
+             ' candidate(s)) - track may sit on the wrong clock');
+  }
   const keys = Object.keys(this.synthSegs).map(Number).sort(function (a, b) { return a - b; });
   const parts = [];
   for (let k = 0; k < keys.length; k++) {
@@ -321,6 +326,26 @@ HlsFmp4Engine.prototype.rebuildSynth_ = function (shift) {
            ' seg(s), shift ' + shift.toFixed(2) + 's');
 };
 
+// The element that is actually playing OUR MediaSource — identified by src,
+// never by "the first <video> on the page": the .6 subdiag showed a loaded
+// track whose cue range covered the playhead with active=0 forever, which is
+// the signature of a track sitting on the WRONG element's clock.
+HlsFmp4Engine.prototype.hostVideo_ = function () {
+  const vids = [];
+  try {
+    document.querySelectorAll('video').forEach(function (v) { vids.push(v); });
+    const player = document.querySelector('cast-media-player');
+    if (player && player.shadowRoot) {
+      player.shadowRoot.querySelectorAll('video').forEach(function (v) { vids.push(v); });
+    }
+  } catch (e) {}
+  let host = null;
+  for (let i = 0; i < vids.length; i++) {
+    if (vids[i].src === this.objectUrl) { host = vids[i]; break; }
+  }
+  return { el: host || vids[0] || null, count: vids.length, matched: !!host };
+};
+
 HlsFmp4Engine.prototype.captionBox_ = function () {
   let box = document.getElementById('hlsengine-captions');
   if (!box) {
@@ -337,8 +362,8 @@ HlsFmp4Engine.prototype.captionBox_ = function () {
     // provably renders above the picture, so that is where captions go too.
     let host = null;
     try {
-      const el = this.findMedia && this.findMedia();
-      if (el && el.parentNode) host = el.parentNode;
+      const found = this.hostVideo_();
+      if (found.el && found.el.parentNode) host = found.el.parentNode;
     } catch (e) {}
     if (!host) {
       host = document.body;
@@ -358,9 +383,16 @@ HlsFmp4Engine.prototype.subDiag_ = function () {
   if (this.dead) { if (this.subDiagTimer) clearInterval(this.subDiagTimer); return; }
   let line = 'subdiag: t=' + Math.round(this.getTime() || 0);
   try {
+    const found = this.hostVideo_();
+    line += ' vids=' + found.count + (found.matched ? ' matched' : ' UNMATCHED');
+    if (found.el) {
+      line += ' hostT=' + Math.round(found.el.currentTime || 0) +
+              (found.el.paused ? ' paused' : '');
+    }
     const trackEl = this.synthTrackEl;
     const track = trackEl && trackEl.track;
     if (!track) { this.log(line + ' no track'); return; }
+    line += ' onHost=' + (found.el && trackEl.parentNode === found.el ? 'yes' : 'NO');
     line += ' mode=' + track.mode + ' ready=' + trackEl.readyState;
     const cues = track.cues;
     line += ' cues=' + (cues ? cues.length : 'null');
