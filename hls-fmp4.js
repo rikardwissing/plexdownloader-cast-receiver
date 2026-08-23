@@ -107,6 +107,8 @@ HlsFmp4Engine.prototype.destroy = function () {
     try { this.synthTrackEl.parentNode.removeChild(this.synthTrackEl); } catch (e) {}
     this.synthTrackEl = null;
   }
+  const box = document.getElementById('hlsengine-captions');
+  if (box) { try { box.innerHTML = ''; } catch (e) {} }
   try { URL.revokeObjectURL(this.objectUrl); } catch (e) {}
 };
 
@@ -290,10 +292,59 @@ HlsFmp4Engine.prototype.rebuildSynth_ = function (shift) {
   t.src = URL.createObjectURL(new Blob([body], { type: 'text/vtt' }));
   el.appendChild(t);
   this.synthTrackEl = t;
-  try { t.track.mode = 'showing'; } catch (e) {}
+  // The cues fire, WE paint. mode='showing' produced no visible text on the
+  // CAF element (field: track rebuilt with cues for minutes, nothing on
+  // screen) — whether CAF knocks the mode or its layers cover the native
+  // renderer, the fix is the same: keep the track hidden (cuechange still
+  // fires) and draw the text in an overlay this page owns.
+  try { t.track.mode = 'hidden'; } catch (e) {}
+  t.track.addEventListener('cuechange', function () { self.paintCues_(); });
+  this.paintCues_();
   this.synthShift = shift;
   this.log('hlsengine: synth track rebuilt, ' + parts.length +
            ' seg(s), shift ' + shift.toFixed(2) + 's');
+};
+
+HlsFmp4Engine.prototype.captionBox_ = function () {
+  let box = document.getElementById('hlsengine-captions');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'hlsengine-captions';
+    box.style.cssText =
+      'position:fixed;left:10%;right:10%;bottom:8%;z-index:9999;' +
+      'text-align:center;pointer-events:none;font-family:sans-serif;' +
+      'font-size:4.2vh;line-height:1.35;color:#fff;' +
+      'text-shadow:0 0 4px #000,0 2px 4px #000;';
+    document.body.appendChild(box);
+  }
+  return box;
+};
+
+HlsFmp4Engine.prototype.paintCues_ = function () {
+  if (this.dead) return;
+  const box = this.captionBox_();
+  let text = '';
+  try {
+    const cues = this.synthTrackEl && this.synthTrackEl.track &&
+                 this.synthTrackEl.track.activeCues;
+    if (cues) {
+      for (let i = 0; i < cues.length; i++) {
+        // VTT markup (<i>, <c.color>…) means nothing to a div — plain text.
+        text += (i ? '\n' : '') + String(cues[i].text || '').replace(/<[^>]*>/g, '');
+      }
+    }
+  } catch (e) {}
+  if (!text) { box.innerHTML = ''; return; }
+  const lines = text.split('\n');
+  let html = '';
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]) continue;
+    html += '<div><span style="background:rgba(0,0,0,0.55);padding:0 0.35em;' +
+            'border-radius:0.15em;box-decoration-break:clone;">' +
+            lines[i].replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+            '</span></div>';
+  }
+  box.innerHTML = html;
 };
 
 // The buffers are created up front from the sender's codec strings — and a
