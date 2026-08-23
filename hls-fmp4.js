@@ -20,6 +20,8 @@
 // the element clock equals the declared grid — the same clock the phone and
 // the browser receivers use, so positions survive handoffs.
 
+const HLS_ENGINE_VERSION = '2026-08-23.5';
+
 function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.masterUrl = masterUrl;
   this.getTime = getTime || function () { return 0; };
@@ -90,6 +92,8 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.synthShift = null;       // shift the current <track> was built with
   this.synthTrackEl = null;
   this.synthTimer = null;
+  this.paintTimer = null;
+  this.paintedOnce = false;
   this.onEngineFailed = null;
   const self = this;
   this.mediaSource.addEventListener('sourceopen', function onOpen() {
@@ -102,6 +106,7 @@ HlsFmp4Engine.prototype.destroy = function () {
   this.dead = true;
   this.generation++;
   if (this.synthTimer) { clearInterval(this.synthTimer); this.synthTimer = null; }
+  if (this.paintTimer) { clearInterval(this.paintTimer); this.paintTimer = null; }
   if (this.synthTrackEl) {
     try { URL.revokeObjectURL(this.synthTrackEl.src); } catch (e) {}
     try { this.synthTrackEl.parentNode.removeChild(this.synthTrackEl); } catch (e) {}
@@ -188,6 +193,9 @@ HlsFmp4Engine.prototype.start_ = async function () {
       Math.max(0, this.segments.length - 1));
     this.windowLo = (this.mediaSequence + this.segIndex) * 10;
     this.windowHi = this.windowLo;
+    this.log('hlsengine ' + HLS_ENGINE_VERSION + ': start, sub=' +
+             (this.wantSubtitle ? 'wanted' : 'off') +
+             (this.subPlaylistUrl ? ' (rendition present)' : ' (no rendition)'));
     await this.createBuffers_();
     this.setupMp4box_();
     this.pump_();
@@ -298,7 +306,12 @@ HlsFmp4Engine.prototype.rebuildSynth_ = function (shift) {
   // renderer, the fix is the same: keep the track hidden (cuechange still
   // fires) and draw the text in an overlay this page owns.
   try { t.track.mode = 'hidden'; } catch (e) {}
-  t.track.addEventListener('cuechange', function () { self.paintCues_(); });
+  // Painting is TIMER-driven, not event-driven: CAF can knock an element
+  // track to 'disabled', which silences cuechange and nulls activeCues — a
+  // poll that re-asserts the mode first survives that.
+  if (!this.paintTimer) {
+    this.paintTimer = setInterval(function () { self.paintCues_(); }, 400);
+  }
   this.paintCues_();
   this.synthShift = shift;
   this.log('hlsengine: synth track rebuilt, ' + parts.length +
@@ -325,13 +338,18 @@ HlsFmp4Engine.prototype.paintCues_ = function () {
   const box = this.captionBox_();
   let text = '';
   try {
-    const cues = this.synthTrackEl && this.synthTrackEl.track &&
-                 this.synthTrackEl.track.activeCues;
+    const track = this.synthTrackEl && this.synthTrackEl.track;
+    if (track && track.mode === 'disabled') track.mode = 'hidden';
+    const cues = track && track.activeCues;
     if (cues) {
       for (let i = 0; i < cues.length; i++) {
         // VTT markup (<i>, <c.color>…) means nothing to a div — plain text.
         text += (i ? '\n' : '') + String(cues[i].text || '').replace(/<[^>]*>/g, '');
       }
+    }
+    if (text && !this.paintedOnce) {
+      this.paintedOnce = true;
+      this.log('hlsengine: first caption painted');
     }
   } catch (e) {}
   if (!text) { box.innerHTML = ''; return; }
@@ -525,10 +543,20 @@ HlsFmp4Engine.prototype.pump_ = async function () {
       if (this.findMedia) {
         try { el = this.findMedia() ? 'yes' : 'no'; } catch (e) { el = 'err'; }
       }
+      let sub = 'none';
+      try {
+        const st = this.synthTrackEl && this.synthTrackEl.track;
+        if (st) {
+          sub = 'mode=' + st.mode +
+                ' ready=' + this.synthTrackEl.readyState +
+                ' cues=' + (st.cues ? st.cues.length : '?') +
+                ' active=' + (st.activeCues ? st.activeCues.length : '?');
+        }
+      } catch (e) { sub = 'err'; }
       this.log('hlsengine: t=' + Math.round(this.getTime() || 0) +
                ' window=[' + Math.round(this.windowLo) + ',' + Math.round(this.windowHi) +
                '] seg=' + (this.mediaSequence + this.segIndex) + ' q=' + queues +
-               ' buf=' + ranges + ' el=' + el);
+               ' buf=' + ranges + ' el=' + el + ' sub[' + sub + ']');
     }
     this.nudgeIfStalled_();
     if (this.segIndex >= this.segments.length) {
