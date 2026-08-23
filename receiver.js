@@ -368,6 +368,7 @@ if (!PREVIEW) {
                                  request.currentTime || 0);
       // The media element, if this platform lets the page see it — the engine
       // uses it to jump the sub-second buffered gaps a raw element stalls on.
+      engine.wantSubtitle = custom.subtitleActive === true;
       engine.findMedia = () => {
         let el = document.querySelector('video');
         if (!el) {

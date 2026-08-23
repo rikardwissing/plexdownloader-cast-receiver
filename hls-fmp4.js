@@ -72,6 +72,24 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
   this.lastReposition = 0;
   this.quotaLogged = 0;
   this.appendsSinceEvict = 0;
+  // Subtitles, browser-receiver style: the session is always built with the
+  // chosen track as the manifest's one VTT rendition (external or embedded
+  // alike), and the element is reachable from page JS (measured: el=yes) - so
+  // the engine fetches the rendition's segments, concatenates the cues (their
+  // LOCALs are absolute source time), and attaches ONE showing <track>. The
+  // shift is fully measured, no constants: elementTime = rawPTS +
+  // currentOffset and rawPTS = sourceTime + lead (from the segments' own
+  // X-TIMESTAMP-MAP), so cues move by (lead + currentOffset) - recomputed
+  // whenever a seek re-anchors the run. Picking a different track on the
+  // phone restarts the session into a new rendition, same as everywhere else.
+  this.wantSubtitle = false;    // set by the page from customData.subtitleActive
+  this.subPlaylistUrl = null;
+  this.subMediaSequence = 0;
+  this.synthSegs = {};          // segment index -> stripped cue text
+  this.synthLead = null;        // X-TIMESTAMP-MAP lead, constant per session
+  this.synthShift = null;       // shift the current <track> was built with
+  this.synthTrackEl = null;
+  this.synthTimer = null;
   this.onEngineFailed = null;
   const self = this;
   this.mediaSource.addEventListener('sourceopen', function onOpen() {
@@ -83,6 +101,12 @@ function HlsFmp4Engine(masterUrl, streamCodecs, getTime, log, startAt) {
 HlsFmp4Engine.prototype.destroy = function () {
   this.dead = true;
   this.generation++;
+  if (this.synthTimer) { clearInterval(this.synthTimer); this.synthTimer = null; }
+  if (this.synthTrackEl) {
+    try { URL.revokeObjectURL(this.synthTrackEl.src); } catch (e) {}
+    try { this.synthTrackEl.parentNode.removeChild(this.synthTrackEl); } catch (e) {}
+    this.synthTrackEl = null;
+  }
   try { URL.revokeObjectURL(this.objectUrl); } catch (e) {}
 };
 
@@ -140,6 +164,13 @@ HlsFmp4Engine.prototype.start_ = async function () {
       .find(function (l) { return l && l.charAt(0) !== '#'; });
     if (!variant) { this.fatal_('no variant in master'); return; }
     this.playlistUrl = new URL(variant, this.masterUrl).href;
+    const subLine = master.split('\n').find(function (l) {
+      return l.indexOf('#EXT-X-MEDIA:') === 0 && l.indexOf('TYPE=SUBTITLES') >= 0;
+    });
+    if (subLine) {
+      const m = /URI="([^"]+)"/.exec(subLine);
+      if (m) this.subPlaylistUrl = new URL(m[1], this.masterUrl).href;
+    }
     await this.refreshPlaylist_();
     if (!this.initUri) { this.fatal_('no EXT-X-MAP in playlist'); return; }
     this.initBytes = await this.bytes_(new URL(this.initUri, this.playlistUrl).href);
@@ -158,7 +189,111 @@ HlsFmp4Engine.prototype.start_ = async function () {
     await this.createBuffers_();
     this.setupMp4box_();
     this.pump_();
+    if (this.wantSubtitle && this.subPlaylistUrl) {
+      const self = this;
+      this.synthTimer = setInterval(function () { self.refreshSynth_(); }, 8000);
+      this.refreshSynth_();
+    } else if (this.wantSubtitle) {
+      this.log('hlsengine: subtitle wanted but master has no rendition');
+    }
   } catch (e) { this.fatal_('start: ' + e); }
+};
+
+HlsFmp4Engine.prototype.shiftTimestamp_ = function (ts, offset) {
+  const parts = ts.split(':');
+  let seconds = 0;
+  for (let i = 0; i < parts.length; i++) seconds = seconds * 60 + parseFloat(parts[i]);
+  seconds = Math.max(0, seconds + offset);
+  const h = Math.floor(seconds / 3600), mn = Math.floor((seconds % 3600) / 60);
+  let sc = (seconds % 60).toFixed(3);
+  if (sc.length < 6) sc = '0' + sc;
+  return (h < 10 ? '0' + h : h) + ':' + (mn < 10 ? '0' + mn : mn) + ':' + sc;
+};
+
+HlsFmp4Engine.prototype.stripVtt_ = function (text) {
+  const map = /X-TIMESTAMP-MAP=LOCAL:([\d:.]+),MPEGTS:(\d+)/.exec(text);
+  if (map) {
+    let local = 0;
+    const lp = map[1].split(':');
+    for (let i = 0; i < lp.length; i++) local = local * 60 + parseFloat(lp[i]);
+    this.synthLead = map[2] / 90000 - local;
+  }
+  return text.split('\n').filter(function (line) {
+    return !/^WEBVTT/.test(line) && !/^X-TIMESTAMP-MAP/.test(line);
+  }).join('\n').replace(/^\s+/, '').replace(/\s+$/, '');
+};
+
+HlsFmp4Engine.prototype.refreshSynth_ = async function () {
+  if (this.dead) { if (this.synthTimer) clearInterval(this.synthTimer); return; }
+  try {
+    const pl = await this.text_(this.subPlaylistUrl);
+    const lines = pl.split('\n');
+    const segs = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      if (line.indexOf('#EXT-X-MEDIA-SEQUENCE:') === 0) {
+        this.subMediaSequence = parseInt(line.slice(22), 10) || 0;
+      } else if (line.charAt(0) !== '#') {
+        segs.push(line);
+      }
+    }
+    // A window around the playhead: segments materialise as the encoder
+    // reaches them, so a miss now is a hit on the next tick.
+    const here = Math.max(0,
+      Math.floor((this.getTime() || 0) / 10) - 3 - this.subMediaSequence);
+    const last = Math.min(segs.length, here + 42);
+    let fetched = false;
+    for (let i = here; i < last; i++) {
+      if (this.synthSegs[i] != null) continue;
+      try {
+        const t = await this.text_(new URL(segs[i], this.subPlaylistUrl).href);
+        this.synthSegs[i] = this.stripVtt_(t);
+        fetched = true;
+      } catch (e) {}
+    }
+    const shift = (this.synthLead != null ? this.synthLead : 0) + this.currentOffset;
+    const changed = this.synthShift == null || Math.abs(shift - this.synthShift) > 0.05;
+    if ((fetched || changed) && Object.keys(this.synthSegs).length) {
+      this.rebuildSynth_(shift);
+    }
+  } catch (e) {}
+};
+
+HlsFmp4Engine.prototype.rebuildSynth_ = function (shift) {
+  let el = null;
+  try { el = this.findMedia && this.findMedia(); } catch (e) {}
+  if (!el) return;
+  const keys = Object.keys(this.synthSegs).map(Number).sort(function (a, b) { return a - b; });
+  const parts = [];
+  for (let k = 0; k < keys.length; k++) {
+    if (this.synthSegs[keys[k]]) parts.push(this.synthSegs[keys[k]]);
+  }
+  if (!parts.length) return;
+  const self = this;
+  let body = 'WEBVTT\n\n' + parts.join('\n\n') + '\n';
+  if (Math.abs(shift) > 0.05) {
+    body = body.split('\n').map(function (line) {
+      if (line.indexOf('-->') < 0) return line;
+      return line.replace(/([\d:.]+)(\s*-->\s*)([\d:.]+)/, function (_, a, arrow, b) {
+        return self.shiftTimestamp_(a, shift) + arrow + self.shiftTimestamp_(b, shift);
+      });
+    }).join('\n');
+  }
+  if (this.synthTrackEl) {
+    try { URL.revokeObjectURL(this.synthTrackEl.src); } catch (e) {}
+    try { this.synthTrackEl.parentNode.removeChild(this.synthTrackEl); } catch (e) {}
+  }
+  const t = document.createElement('track');
+  t.kind = 'subtitles';
+  t.label = 'Subtitles';
+  t.src = URL.createObjectURL(new Blob([body], { type: 'text/vtt' }));
+  el.appendChild(t);
+  this.synthTrackEl = t;
+  try { t.track.mode = 'showing'; } catch (e) {}
+  this.synthShift = shift;
+  this.log('hlsengine: synth track rebuilt, ' + parts.length +
+           ' seg(s), shift ' + shift.toFixed(2) + 's');
 };
 
 // The buffers are created up front from the sender's codec strings — and a
