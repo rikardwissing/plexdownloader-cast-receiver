@@ -415,6 +415,27 @@ if (!PREVIEW) {
       media.contentId = engine.objectUrl;
       media.contentType = 'video/mp4';
       slog('engine load: ' + url + ' audio#' + (custom.audioTypeIndex || 0));
+    } else if (custom.mkvEngine && window.MediaSource && typeof MkvEngine !== 'undefined') {
+      // A Matroska direct file: demuxed in page JS (mkv-engine.js) into the
+      // split per-track buffers every measured platform accepts — Dolby
+      // included on this device. CAF drives the blob exactly like the MSE
+      // engine's; subtitles arrive as the sender's sidecar tracks and render
+      // natively. Seeks ride the SEEK interceptor into engine.reposition.
+      const mkvUrl = media.contentUrl || media.contentId;
+      engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
+        getTime: () => playerManager.getCurrentTimeSec() || 0,
+        log: slog,
+        startAt: request.currentTime || 0,
+      });
+      engine.onEngineFailed = (reason) => {
+        slog('mkv engine failed: ' + reason);
+        teardownEngine();
+        Screens.error("Can't play this video", String(reason));
+      };
+      media.contentUrl = engine.objectUrl;
+      media.contentId = engine.objectUrl;
+      media.contentType = 'video/mp4';
+      slog('mkv engine load: audio#' + (custom.audioTypeIndex || 0));
     }
     return request;
   });
