@@ -336,6 +336,12 @@ if (!PREVIEW) {
     const isUniversal = url.indexOf('/transcode/universal/') >= 0;
     const streamCodecs = (typeof custom.streamCodecs === 'string' && custom.streamCodecs)
       ? custom.streamCodecs : null;
+    // A stream session built WITH a subtitle carries it as the manifest's one
+    // rendition — but it never surfaces into GCK media status (measured:
+    // tracks text=[] on every stream load), so the sender cannot activate it,
+    // and CAF never self-activates text. Remember the wish; the LOAD_COMPLETE
+    // handler flips it on through CAF's own TextTracksManager.
+    wantStreamSubtitle = isUniversal && custom.subtitleActive === true;
     const dolbyStream = isUniversal && streamCodecs &&
       /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
     const container = (typeof custom.streamContainer === 'string')
@@ -442,8 +448,23 @@ if (!PREVIEW) {
   // media's finish while the new engine is loading (that killed the first
   // engine cast in the field). The LOAD interceptor is the teardown point.
 
-  playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE,
-                                 () => { clearLoadWatch(); Screens.show('playback'); });
+  let wantStreamSubtitle = false;
+  playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE, () => {
+    clearLoadWatch();
+    Screens.show('playback');
+    if (wantStreamSubtitle) {
+      try {
+        const ttMgr = playerManager.getTextTracksManager();
+        const tracks = ttMgr.getTracks() || [];
+        if (tracks.length) {
+          ttMgr.setActiveByIds([tracks[0].trackId]);
+          slog('stream subtitle activated: track ' + tracks[0].trackId);
+        } else {
+          slog('stream subtitle wanted but no text tracks visible');
+        }
+      } catch (e) { slog('stream subtitle activation failed: ' + e); }
+    }
+  });
   playerManager.addEventListener(events.EventType.MEDIA_FINISHED,
                                  () => Screens.show('idle'));
   playerManager.addEventListener(events.EventType.ERROR, (e) => {

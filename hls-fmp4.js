@@ -187,7 +187,21 @@ HlsFmp4Engine.prototype.createBuffers_ = async function () {
                  (attempt ? ' (after ' + attempt + ' retries)' : ''));
         break;
       } catch (e) {
-        if (e && e.name === 'NotSupportedError' && attempt < 12) {
+        // Field-measured outage: the refusals lasted ~28s across two loads
+        // and cleared by ~47s after receiver launch — budget most of a
+        // minute, and say what the capability APIs claim while it lasts.
+        if (e && e.name === 'NotSupportedError' && attempt < 60) {
+          if (attempt === 0 || attempt % 15 === 14) {
+            let claims = '';
+            try {
+              claims = ' isTypeSupported=' + MediaSource.isTypeSupported(w.mime) +
+                       ' canDisplayType=' + (window.cast && cast.framework &&
+                         cast.framework.CastReceiverContext.getInstance()
+                           .canDisplayType(w.mime));
+            } catch (e2) {}
+            this.log('hlsengine: ' + w.mime + ' refused (attempt ' +
+                     (attempt + 1) + ')' + claims);
+          }
           attempt++;
           await this.sleep_(750);
           continue;
