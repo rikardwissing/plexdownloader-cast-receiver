@@ -155,9 +155,47 @@ HlsFmp4Engine.prototype.start_ = async function () {
       Math.max(0, this.segments.length - 1));
     this.windowLo = (this.mediaSequence + this.segIndex) * 10;
     this.windowHi = this.windowLo;
+    await this.createBuffers_();
     this.setupMp4box_();
     this.pump_();
   } catch (e) { this.fatal_('start: ' + e); }
+};
+
+// The buffers are created up front from the sender's codec strings — and a
+// refusal is retried: the TV's Dolby MSE capability FLICKERS for a few
+// seconds after the receiver boots (field: addSourceBuffer ec-3 threw
+// NotSupportedError two seconds after launch and succeeded forty seconds
+// later; the same call passed in every later pong). A transient no is not a
+// fatal no.
+HlsFmp4Engine.prototype.createBuffers_ = async function () {
+  const wanted = [];
+  if (this.videoCodec) wanted.push({ kind: 'video', mime: 'video/mp4; codecs="' + this.videoCodec + '"' });
+  if (this.audioCodec) wanted.push({ kind: 'audio', mime: 'audio/mp4; codecs="' + this.audioCodec + '"' });
+  for (let i = 0; i < wanted.length; i++) {
+    const w = wanted[i];
+    let attempt = 0;
+    for (;;) {
+      if (this.dead) return;
+      try {
+        const sb = this.mediaSource.addSourceBuffer(w.mime);
+        const self = this;
+        const entry = { sb: sb, kind: w.kind, queue: [] };
+        sb.addEventListener('updateend', function () { self.drain_(entry); });
+        sb.addEventListener('error', function () { self.fatal_('sourcebuffer error (' + entry.kind + ')'); });
+        this.buffers.push(entry);
+        this.log('hlsengine: buffer ' + w.mime +
+                 (attempt ? ' (after ' + attempt + ' retries)' : ''));
+        break;
+      } catch (e) {
+        if (e && e.name === 'NotSupportedError' && attempt < 12) {
+          attempt++;
+          await this.sleep_(750);
+          continue;
+        }
+        throw e;
+      }
+    }
+  }
 };
 
 // A fresh demux context, wired to the (possibly pre-existing) SourceBuffers.
@@ -283,10 +321,14 @@ HlsFmp4Engine.prototype.pump_ = async function () {
           ranges += (i ? ' | ' : '') + r;
         } catch (e) {}
       }
+      let el = 'no-probe';
+      if (this.findMedia) {
+        try { el = this.findMedia() ? 'yes' : 'no'; } catch (e) { el = 'err'; }
+      }
       this.log('hlsengine: t=' + Math.round(this.getTime() || 0) +
                ' window=[' + Math.round(this.windowLo) + ',' + Math.round(this.windowHi) +
                '] seg=' + (this.mediaSequence + this.segIndex) + ' q=' + queues +
-               ' buf=' + ranges);
+               ' buf=' + ranges + ' el=' + el);
     }
     this.nudgeIfStalled_();
     if (this.segIndex >= this.segments.length) {
