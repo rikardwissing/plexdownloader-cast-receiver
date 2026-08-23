@@ -346,53 +346,21 @@ if (!PREVIEW) {
       /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
     const container = (typeof custom.streamContainer === 'string')
       ? custom.streamContainer : null;
-    if (isUniversal && container === 'mpegts') {
-      // Real MPEG-TS (the h264 recipe branch): the STANDARD path. Shaka's own
-      // TS transmuxer demuxes — including AC-3/E-AC-3 — so no rename, no
-      // CODECS injection, no engine. This is the shape the whole 2026-08-21
-      // investigation concluded a Cast receiver actually wants.
-      slog('plex stream load: mpegts, plain shaka' +
-           (streamCodecs ? ' (codecs ' + streamCodecs + ')' : ''));
-    } else if (dolbyStream && window.MediaSource && typeof MP4Box !== 'undefined' &&
-        typeof HlsFmp4Engine !== 'undefined') {
-      // Muxed Dolby cannot pass MSE on this platform in ANY engine
-      // configuration (all measured 2026-08-21: combined buffer refused at
-      // three API layers; Shaka appends muxed bytes unsplit; pure 4.16
-      // silently hangs). The platform DOES accept the demuxed two-buffer
-      // topology - the packages play that way - so the receiver demuxes for
-      // real: hls-fmp4.js fetches the session's own segments and mp4box
-      // splits them per track. CAF just sees a blob URL, same as the
-      // direct-file MSE engine.
-      engine = new HlsFmp4Engine(url, streamCodecs,
-                                 () => playerManager.getCurrentTimeSec() || 0, slog,
-                                 request.currentTime || 0);
-      // The media element, if this platform lets the page see it — the engine
-      // uses it to jump the sub-second buffered gaps a raw element stalls on.
-      engine.wantSubtitle = custom.subtitleActive === true;
-      engine.findMedia = () => {
-        let el = document.querySelector('video');
-        if (!el) {
-          const player = document.querySelector('cast-media-player');
-          if (player && player.shadowRoot) el = player.shadowRoot.querySelector('video');
-        }
-        return el;
-      };
-      engine.onEngineFailed = (reason) => {
-        slog('hls demux engine failed: ' + reason);
-        teardownEngine();
-        Screens.error("Can't play this video",
-                      'The stream could not be demuxed for this TV.');
-      };
-      media.contentUrl = engine.objectUrl;
-      media.contentId = engine.objectUrl;
-      media.contentType = 'video/mp4';
-      slog('plex dolby stream: receiver demux engine, codecs ' + streamCodecs);
-    } else if (isUniversal) {
-      // Non-Dolby streams stay on Shaka, WITH the interventions: the clean
-      // 4.16 baseline (2026-08-21.10) proved Plex's .ts-named fMP4 sends the
-      // extension-guessing pipeline into a silent hang for any codec, so the
-      // manifest must say fMP4 (rename) and say the codecs (sender's own
-      // strings; guessing and init-parsing both measured failing).
+    if (isUniversal) {
+      // ONE path for every stream: Shaka. Dolby streams ride the
+      // Fmp4SplitTransmuxer (fmp4-split.js) registered through Shaka's own
+      // plugin API — it extracts each track from the muxed segments with
+      // mp4box, which is the only demux this platform accepts for Dolby
+      // (single-buffer muxed refused at every API layer, measured). Shaka
+      // then owns the timeline, buffering, seeks — and the subtitle rendition
+      // flows through CAF's native renderer. forceTransmux is what routes
+      // even the MSE-supported avc1 video stream through the splitter (its
+      // muxed payload needs extraction too); only these loads set it.
+      // The rename and CODECS are the same measured requirements as always:
+      // Plex names fMP4 ".ts" and declares no codecs.
+      const dolby = streamCodecs && /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
+      window.__fmp4SplitLog = slog;
+      if (window.__fmp4SplitRegister) window.__fmp4SplitRegister();
       playbackConfig.manifestHandler = (manifest) => {
         let out = manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
         if (streamCodecs && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
@@ -405,10 +373,12 @@ if (!PREVIEW) {
       playbackConfig.segmentRequestHandler = (request2) => {
         request2.url = request2.url.replace('.ts.m4s', '.ts');
       };
-      if (!streamCodecs) {
+      if (dolby) {
+        playbackConfig.shakaConfig = { mediaSource: { forceTransmux: true } };
+      } else if (!streamCodecs) {
         playbackConfig.shakaConfig = { manifest: { hls: { disableCodecGuessing: true } } };
       }
-      slog('plex stream load: .m4s rename' +
+      slog('plex stream load: shaka' + (dolby ? ' + fmp4-split' : '') +
            (streamCodecs ? (', CODECS="' + streamCodecs + '"') : ', codecs from init'));
     }
     playerManager.setPlaybackConfig(playbackConfig);
