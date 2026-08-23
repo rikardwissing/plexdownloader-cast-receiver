@@ -81,6 +81,10 @@
         if ((contentType === 'video') === isVideo) { picked = codecs[i]; break; }
       }
       if (!picked) picked = codecs[0] || '';
+      // Strip the routing marker the manifest wears (see receiver.js): its
+      // whole job was to walk this stream into the transmuxer path — the
+      // real codec is what the SourceBuffer must hear.
+      picked = picked.replace(/\.pdl$/i, '');
       return contentType + '/mp4; codecs="' + picked + '"';
     }
 

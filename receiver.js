@@ -361,12 +361,29 @@ if (!PREVIEW) {
       const dolby = streamCodecs && /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
       window.__fmp4SplitLog = slog;
       if (window.__fmp4SplitRegister) window.__fmp4SplitRegister();
+      // Shaka 4.16 splits muxed content NATIVELY (needSplitMuxedContent_,
+      // read from its source): the variant's unsupported combined type
+      // recurses into per-codec buffers — but the recursed VIDEO type is
+      // MSE-supported on its own, so Shaka appends the muxed bytes raw
+      // (measured: audio split by our plugin, video 3014). forceTransmux was
+      // set and provably did not land through CAF. The lever we DO control is
+      // the CODECS attribute: a ".pdl" marker on the video codec makes
+      // isTypeSupported reject it, which walks the video buffer into the
+      // transmuxer path naturally; the plugin's convertCodecs strips the
+      // marker so the real codec reaches addSourceBuffer.
+      let codecsAttr = streamCodecs;
+      if (dolby && streamCodecs) {
+        codecsAttr = streamCodecs.split(',').map((c) => {
+          c = c.trim();
+          return /^(avc1|avc3|hvc1|hev1)/i.test(c) ? c + '.pdl' : c;
+        }).join(',');
+      }
       playbackConfig.manifestHandler = (manifest) => {
         let out = manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
-        if (streamCodecs && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
+        if (codecsAttr && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
             out.indexOf('CODECS=') < 0) {
           out = out.replace(/^#EXT-X-STREAM-INF:(.*)$/gm,
-            '#EXT-X-STREAM-INF:$1,CODECS="' + streamCodecs + '"');
+            '#EXT-X-STREAM-INF:$1,CODECS="' + codecsAttr + '"');
         }
         return out;
       };
@@ -379,7 +396,7 @@ if (!PREVIEW) {
         playbackConfig.shakaConfig = { manifest: { hls: { disableCodecGuessing: true } } };
       }
       slog('plex stream load: shaka' + (dolby ? ' + fmp4-split' : '') +
-           (streamCodecs ? (', CODECS="' + streamCodecs + '"') : ', codecs from init'));
+           (codecsAttr ? (', CODECS="' + codecsAttr + '"') : ', codecs from init'));
     }
     playerManager.setPlaybackConfig(playbackConfig);
     const meta = media.metadata || {};
