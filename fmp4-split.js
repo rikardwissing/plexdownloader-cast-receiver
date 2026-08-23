@@ -62,11 +62,12 @@
         const codecs = codecList(mt);
         const hasVideo = codecs.some(function (c) { return VIDEO_CODEC.test(c); });
         const hasDolby = codecs.some(function (c) { return DOLBY_CODEC.test(c); });
-        // The audio side of a muxed variant (a Dolby codec riding any mp4
-        // mimetype), or — under forceTransmux, which only OUR Dolby loads set
-        // — the video side that needs its muxed payload split.
-        answer = codecs.length > 0 &&
-          (hasDolby || (contentType === 'video' && hasVideo));
+        // Claim the audio side of a muxed variant (a Dolby codec riding any
+        // mp4 mimetype) AND the lone-video side (its muxed payload needs the
+        // split; the isTypeSupported gate is what sent it here). contentType
+        // is UNDEFINED in most call sites (measured — mse.js passes one arg),
+        // so it cannot gate anything.
+        answer = codecs.length > 0 && (hasDolby || hasVideo);
       }
       log('fmp4split: isSupported(' + mimeType + ', ' + contentType + ') = ' + answer);
       return answer;

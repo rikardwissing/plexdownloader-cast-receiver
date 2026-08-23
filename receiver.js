@@ -334,6 +334,7 @@ if (!PREVIEW) {
     const playbackConfig = new cast.framework.PlaybackConfig();
     const url = media.contentUrl || media.contentId || '';
     const isUniversal = url.indexOf('/transcode/universal/') >= 0;
+    window.__dolbySplitActive = false;   // set again below for Dolby streams
     const streamCodecs = (typeof custom.streamCodecs === 'string' && custom.streamCodecs)
       ? custom.streamCodecs : null;
     // A stream session built WITH a subtitle carries it as the manifest's one
@@ -371,13 +372,11 @@ if (!PREVIEW) {
       // isTypeSupported reject it, which walks the video buffer into the
       // transmuxer path naturally; the plugin's convertCodecs strips the
       // marker so the real codec reaches addSourceBuffer.
-      let codecsAttr = streamCodecs;
-      if (dolby && streamCodecs) {
-        codecsAttr = streamCodecs.split(',').map((c) => {
-          c = c.trim();
-          return /^(avc1|avc3|hvc1|hev1)/i.test(c) ? c + '.pdl' : c;
-        }).join(',');
-      }
+      // Honest codecs only — the split is routed by the isTypeSupported gate
+      // in index.html instead (the marker approach died in Shaka's codec
+      // normalizer, measured: avc1.42E01E.pdl -> avc1.2a0NaN).
+      const codecsAttr = streamCodecs;
+      window.__dolbySplitActive = !!dolby;
       playbackConfig.manifestHandler = (manifest) => {
         let out = manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
         if (codecsAttr && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
