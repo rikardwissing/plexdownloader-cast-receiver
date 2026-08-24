@@ -794,6 +794,9 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.fetchTimeoutMs = opts.fetchTimeoutMs || 15000;
   this.inflightAbort = null;
   this.getTime = opts.getTime || function () { return 0; };
+  // Optional: move the ELEMENT's playhead (the engine has no element). Used
+  // for gap hops — see stallCheck_.
+  this.seekTo = opts.seekTo || null;
   this.log = opts.log || function () {};
   this.startAt = opts.startAt || 0;
   this.mediaSource = new MediaSource();
@@ -1115,11 +1118,50 @@ MkvEngine.prototype.stallCheck_ = function () {
   if (t <= 0) return;
   var durSec = this.demux.durationMs() / 1000;
   if (durSec && t + 1 >= durSec) return;         // the end is not a gap
-  if (this.isBuffered_(t + 0.3)) return;
+  // The PLAYHEAD itself, not a point ahead of it: checking t+0.3 read the
+  // island just past a tiny gap as "all fine" and neither hopped nor
+  // repumped while Safari sat 0.2s before the data forever (field
+  // 2026-08-24, resume at 276.13 vs buffered 276.3+).
+  if (this.isBuffered_(t)) return;
+  // A SMALL gap just ahead: the resume seek landed a breath before the
+  // first decodable frame (the cue cluster's IDR sits after the target).
+  // Chrome hops such gaps by itself; Safari sits in front of them forever
+  // (field 2026-08-24: t=276.13 vs buffered 276.3-333.8, spinner for
+  // eternity). The data is already there — nudge the playhead, don't
+  // repump (a repump refetches the same cue and rebuilds the same island).
+  if (this.seekTo) {
+    var hop = this.bufferedStartAfter_(t);
+    if (hop != null && hop - t < 2 && this.isBuffered_(hop + 0.05)) {
+      this.log('mkvengine: gap hop ' + t.toFixed(2) + 's -> ' + hop.toFixed(2) + 's');
+      try { this.seekTo(hop + 0.05); } catch (e) {}
+      return;
+    }
+  }
   if (this.inflightAbort) return;                // pump is actively fetching
   if (Date.now() - this.lastFetchDoneAt < 3000) return;  // …or just was
   this.log('mkvengine: gap at ' + Math.round(t) + 's — repump');
   this.repump_(t);
+};
+
+// Where playable data resumes after `seconds`: the LATEST of the lanes'
+// next-range starts (the element needs every lane buffered to proceed), or
+// null when any lane has nothing ahead within reach.
+MkvEngine.prototype.bufferedStartAfter_ = function (seconds) {
+  var latest = null;
+  for (var k in this.lanes) {
+    var sb = this.lanes[k].sb;
+    if (!sb) continue;
+    var next = null;
+    try {
+      var b = sb.buffered;
+      for (var i = 0; i < b.length; i++) {
+        if (b.end(i) > seconds + 0.1) { next = Math.max(b.start(i), seconds); break; }
+      }
+    } catch (e) {}
+    if (next == null) return null;
+    if (latest == null || next > latest) latest = next;
+  }
+  return latest;
 };
 
 MkvEngine.prototype.reposition = function (seconds) {

@@ -425,6 +425,7 @@ if (!PREVIEW) {
       lastLoad = { url: mkvUrl, media: Object.assign({}, media), custom };
       engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
         getTime: () => playerManager.getCurrentTimeSec() || 0,
+        seekTo: (s) => { try { playerManager.seek(s); } catch (e) {} },
         log: slog,
         startAt: request.currentTime || 0,
       });
