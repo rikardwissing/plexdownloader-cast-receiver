@@ -865,6 +865,7 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
     if (self.dead || (gen != null && gen !== self.generation)) {
       return Promise.reject(lastErr || new Error('superseded'));
     }
+    if (attempt > 3) attempt = 3;   // timeouts re-enter here without counting up
     var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     self.inflightAbort = ctrl;
     var timedOut = false;
@@ -895,9 +896,13 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
         if (timedOut) self.sawSlowFetch = true;
         self.log('mkvengine: fetch @' + start + ' attempt ' + attempt + ' failed after ' +
                  (Date.now() - t0) + 'ms: ' + (timedOut ? 'timeout' : e));
-        if (attempt >= 3) throw lastErr;
+        // A TIMEOUT is a slow server, not a dead one — keep trying for as
+        // long as the load lives, spinner showing (Rikard's call 2026-08-24:
+        // never abort a stream because the server is merely slow). Real
+        // errors (404, refused) still give up after three tries.
+        if (!timedOut && attempt >= 3) throw lastErr;
         return self.sleep_(500 * attempt).then(function () {
-          return attemptFetch(attempt + 1);
+          return attemptFetch(timedOut ? attempt : attempt + 1);
         });
       });
   }
