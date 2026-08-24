@@ -794,6 +794,7 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.lanes = {};              // trackNumber -> {muxer,timeline,sb,queue,pending,pendingMs,initSent}
   this.onEngineFailed = null;
   this.appendedMs = 0;          // furthest pts appended THIS run (repump re-anchors)
+  this.pumpStartMs = -1e9;      // where the CURRENT run began (media ms)
   this.lastFetchDoneAt = Date.now();
   this.stallTimer = setInterval(function () { self.stallCheck_(); }, 2000);
   this.evictCountdown = 0;
@@ -1019,6 +1020,7 @@ MkvEngine.prototype.openLanes_ = function () {
       }
     }
     var at = Math.max(this.getTime() * 1000 || 0, this.startAt * 1000);
+    this.pumpStartMs = at;
     this.pump_(this.offsetForMs_(at));
   } catch (e) { this.fatal_('start: ' + e); }
 };
@@ -1109,6 +1111,16 @@ MkvEngine.prototype.reposition = function (seconds) {
   if (!haveLanes) return;
   // In-window seeks play from what is buffered; only leave for real jumps.
   if (this.isBuffered_(seconds)) return;
+  // The pump is already HEADED here: the element's own initial seek to the
+  // load's startTime lands before anything is buffered, and repumping then
+  // aborts the startup run only to restart it at the same cue — a
+  // discontinuity for nothing, and one Safari's ec-3 decoder answers with
+  // MEDIA_ERR_DECODE (field 2026-08-24: every remote resume load died at
+  // "repump <startTime>s"; the same file with no startup repump plays).
+  if (Math.abs(seconds * 1000 - this.pumpStartMs) < 5000 &&
+      (this.inflightAbort || Date.now() - this.lastFetchDoneAt < 3000)) {
+    return;
+  }
   this.repump_(seconds);
 };
 
@@ -1146,6 +1158,7 @@ MkvEngine.prototype.repump_ = function (seconds) {
   // backpressure check see "a minute ahead already" and sleep FOREVER
   // without fetching a byte (the 2026-08-24 backward-seek stall).
   this.appendedMs = ms;
+  this.pumpStartMs = ms;
   this.pump_(this.offsetForMs_(ms));
 };
 
