@@ -922,39 +922,73 @@ MkvEngine.prototype.start_ = function () {
 
 // The synchronous back half of start_: pick tracks, open a SourceBuffer lane
 // for each, and kick the first pump.
+// The codec string a track would mux to, or its raw codecId when unknown.
+MkvEngine.prototype.trackCodec_ = function (track) {
+  var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
+  return new Fmp4Muxer(track, timescale).codecString() || track.codecId;
+};
+
+MkvEngine.prototype.trackSupported_ = function (track) {
+  var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
+  var muxer = new Fmp4Muxer(track, timescale);
+  return !!muxer.codecString() && MediaSource.isTypeSupported(muxer.contentType());
+};
+
 MkvEngine.prototype.openLanes_ = function () {
   try {
-    // Choose tracks: the video track, and the audioTypeIndex-th audio track.
-    var video = null, audio = null, audioSeen = 0;
-    for (var i = 0; i < this.demux.tracks.length; i++) {
-      var t = this.demux.tracks[i];
+    // Pick the video track and an audio track — the requested one, falling
+    // back to any DECODABLE audio when it isn't (a Dolby default on a
+    // desktop browser with no ec-3 decoder must not kill a file that also
+    // carries AAC). What can't be helped is named precisely: "cannot decode
+    // the audio (ec-3)" is actionable, "can't play the MKV" is not.
+    var video = null, audioTracks = [], i, t;
+    for (i = 0; i < this.demux.tracks.length; i++) {
+      t = this.demux.tracks[i];
       if (t.type === 1 && !video) video = t;
-      if (t.type === 2) {
-        if (audioSeen === this.audioTypeIndex) audio = t;
-        audioSeen++;
-      }
+      if (t.type === 2) audioTracks.push(t);
     }
-    if (!audio) {
-      audioSeen = 0;
-      for (i = 0; i < this.demux.tracks.length; i++) {
-        if (this.demux.tracks[i].type === 2) { audio = this.demux.tracks[i]; break; }
+    if (video && !this.trackSupported_(video)) {
+      this.fatal_('this device cannot decode the video (' + this.trackCodec_(video) + ')');
+      return;
+    }
+    var audio = null;
+    if (audioTracks.length) {
+      var want = Math.max(0, Math.min(this.audioTypeIndex || 0, audioTracks.length - 1));
+      var order = [audioTracks[want]];
+      for (i = 0; i < audioTracks.length; i++) {
+        if (i !== want) order.push(audioTracks[i]);
+      }
+      for (i = 0; i < order.length; i++) {
+        if (this.trackSupported_(order[i])) { audio = order[i]; break; }
+      }
+      if (!audio) {
+        var codecs = [];
+        for (i = 0; i < audioTracks.length; i++) {
+          var c = this.trackCodec_(audioTracks[i]);
+          if (codecs.indexOf(c) < 0) codecs.push(c);
+        }
+        this.fatal_('this device cannot decode the audio (' + codecs.join(', ') + ')');
+        return;
+      }
+      if (audio !== audioTracks[want]) {
+        this.log('mkvengine: audio #' + want + ' (' + this.trackCodec_(audioTracks[want]) +
+                 ') undecodable here — using ' + this.trackCodec_(audio) + ' instead');
       }
     }
     var chosen = [];
     if (video) chosen.push(video);
     if (audio) chosen.push(audio);
     if (!chosen.length) { this.fatal_('no playable tracks'); return; }
+    // Every lane is CREATED before anything is appended: setting duration
+    // while a SourceBuffer is updating throws per spec — silently, inside
+    // the old try/catch — and Safari (unlike Chrome, which falls back to the
+    // init segment's own mvhd) then discovers the duration only as data
+    // buffers: the "filling in" scrubber of 2026-08-24.
     for (i = 0; i < chosen.length; i++) {
       var track = chosen[i];
       var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
       var muxer = new Fmp4Muxer(track, timescale);
-      var codec = muxer.codecString();
-      if (!codec) { this.fatal_('unsupported codec ' + track.codecId); return; }
       var mime = muxer.contentType();
-      if (!MediaSource.isTypeSupported(mime)) {
-        this.fatal_('this device cannot decode ' + codec);
-        return;
-      }
       var sb = this.mediaSource.addSourceBuffer(mime);
       var lane = { muxer: muxer, timeline: new MkvTrackTimeline(track, timescale),
                    sb: sb, queue: [], pending: [], pendingSinceMs: null, track: track };
@@ -973,14 +1007,17 @@ MkvEngine.prototype.openLanes_ = function () {
       })(this, lane);
       this.lanes[track.number] = lane;
       this.log('mkvengine: lane ' + track.number + ' ' + mime);
-      if (!muxer.needsFirstFrame()) {
-        lane.initBytes = muxer.initSegment(this.demux.durationMs());
-        lane.queue.push(lane.initBytes);
-        lane.initSent = true;
-        this.drain_(lane);
-      }
     }
     try { this.mediaSource.duration = this.demux.durationMs() / 1000; } catch (e) {}
+    for (var k in this.lanes) {
+      var opened = this.lanes[k];
+      if (!opened.muxer.needsFirstFrame()) {
+        opened.initBytes = opened.muxer.initSegment(this.demux.durationMs());
+        opened.queue.push(opened.initBytes);
+        opened.initSent = true;
+        this.drain_(opened);
+      }
+    }
     var at = Math.max(this.getTime() * 1000 || 0, this.startAt * 1000);
     this.pump_(this.offsetForMs_(at));
   } catch (e) { this.fatal_('start: ' + e); }
@@ -1137,10 +1174,15 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   var timescale = Math.round(newTrack.audio.sampleRate);
   var muxer = new Fmp4Muxer(newTrack, timescale);
   var codec = muxer.codecString();
-  if (!codec) { this.fatal_('unsupported codec ' + newTrack.codecId); return; }
+  // An undecodable pick REFUSES and keeps playing — fatal_ here killed the
+  // whole cast for choosing a Dolby track on a browser without the decoder.
+  if (!codec) {
+    this.log('mkvengine: cannot mux ' + newTrack.codecId + ' — keeping the current audio track');
+    return;
+  }
   var mime = muxer.contentType();
   if (!MediaSource.isTypeSupported(mime)) {
-    this.fatal_('this device cannot decode ' + codec);
+    this.log('mkvengine: cannot decode ' + codec + ' here — keeping the current audio track');
     return;
   }
   var oldMime = lane.muxer.contentType();
