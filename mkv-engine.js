@@ -723,7 +723,17 @@ MkvTrackTimeline.prototype.convert = function (raw) {
     dur = this.prevPts != null && pts > this.prevPts
       ? (pts - this.prevPts) : Math.round(this.timescale / 30);
   }
-  if (this.nextDts == null) this.nextDts = pts;
+  if (this.nextDts == null) {
+    // VIDEO anchors the decode grid a few frames BEFORE the first pts. With
+    // B-pyramids, a grid anchored AT the first pts hands later frames
+    // pts < dts — "presents before it decodes", which is impossible and
+    // which WebKit's decoder rejects as MEDIA_ERR_DECODE (field 2026-08-24:
+    // resume positions whose cue cluster starts on its IDR died on Safari;
+    // Chrome recomputes and forgives). Four frames covers every sane
+    // pyramid; the constant shift moves tfdt, never presentation time.
+    var delay = this.track.type === 1 && this.frameTicks ? 4 * this.frameTicks : 0;
+    this.nextDts = Math.max(0, pts - delay);
+  }
   var dts = this.nextDts;
   this.nextDts += dur;
   this.prevPts = pts;
@@ -1235,6 +1245,15 @@ MkvEngine.prototype.pump_ = function (startOffset) {
   function onBlock(trackNum, raw) {
     var lane = self.lanes[trackNum];
     if (!lane) return;
+    var isVideo = lane.track.type === 1;
+    // VIDEO fragments BEGIN ON KEYFRAMES — one fragment per GOP. This is
+    // load-bearing, not cosmetic: WebKit's decoder dies (MEDIA_ERR_DECODE)
+    // crossing an append seam that lands mid-GOP during live delivery —
+    // minimal repro 2026-08-24: init → seek → incremental 1s-cut fragments
+    // of a clean stream failed the moment buffering crossed the playhead,
+    // while the SAME bytes appended in one shot played. Every real-world
+    // fMP4 pipeline cuts at keyframes for this reason.
+    if (isVideo && raw.keyframe && lane.pending.length) self.flushLane_(lane);
     if (!lane.initSent) {
       // Dolby lanes build their init from the first frame's own header.
       lane.muxer.noteFirstFrame(raw.data);
@@ -1246,9 +1265,9 @@ MkvEngine.prototype.pump_ = function (startOffset) {
     lane.pending.push(sample);
     if (lane.pendingSinceMs == null) lane.pendingSinceMs = raw.ptsMs;
     if (raw.ptsMs > self.appendedMs) self.appendedMs = raw.ptsMs;
-    // ~1 second per fragment, and video fragments begin on keyframes when
-    // the source has them (cleaner random access for the element).
-    if (raw.ptsMs - lane.pendingSinceMs >= 1000) self.flushLane_(lane);
+    // Audio has no GOPs: ~1 second per fragment. Video only time-flushes as
+    // a backstop against degenerate keyframe-less stretches.
+    if (raw.ptsMs - lane.pendingSinceMs >= (isVideo ? 8000 : 1000)) self.flushLane_(lane);
   }
 
   // End of the run: flush the last partial fragments, then endOfStream once
