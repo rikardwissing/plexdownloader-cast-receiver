@@ -888,6 +888,11 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
         lastErr = e;
         // Aborted because we were superseded or torn down — not an error.
         if (self.dead || (gen != null && gen !== self.generation)) throw e;
+        // Remembered so the page can say "the server is too slow" instead of
+        // "the connection dropped" — measured 2026-08-24: an idle PMS serving
+        // media at 100KB/s times out every window while its API answers in
+        // 66ms. The two need different words.
+        if (timedOut) self.sawSlowFetch = true;
         self.log('mkvengine: fetch @' + start + ' attempt ' + attempt + ' failed after ' +
                  (Date.now() - t0) + 'ms: ' + (timedOut ? 'timeout' : e));
         if (attempt >= 3) throw lastErr;
