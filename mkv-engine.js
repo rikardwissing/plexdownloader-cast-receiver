@@ -329,24 +329,25 @@ MkvDemuxer.prototype.parseClusterBody_ = function (r, onSample) {
       this.parseBlock_(r.readBytes(size.value), clusterTicks, null, onSample);
     } else if (id.value === MKV_ID.BlockGroup) {
       var g = new MkvByteReader(r.readBytes(size.value), 0);
-      var blockBytes = null, hasReference = false;
+      var blockBytes = null, hasReference = false, durationTicks = null;
       while (g.remaining() > 1) {
         var gid = g.readVint(true); var gsize = g.readVint(false);
         if (!gid || !gsize) break;
         if (gid.value === MKV_ID.Block) blockBytes = g.readBytes(gsize.value);
+        else if (gid.value === 0x9B) durationTicks = g.readUint(gsize.value);  // BlockDuration — a subtitle cue's END
         else {
           if (gid.value === 0xFB) hasReference = true;   // ReferenceBlock
           g.pos += gsize.value;
         }
       }
-      if (blockBytes) this.parseBlock_(blockBytes, clusterTicks, !hasReference, onSample);
+      if (blockBytes) this.parseBlock_(blockBytes, clusterTicks, !hasReference, onSample, durationTicks);
     } else {
       r.pos += size.value;
     }
   }
 };
 
-MkvDemuxer.prototype.parseBlock_ = function (u8, clusterTicks, keyOverride, onSample) {
+MkvDemuxer.prototype.parseBlock_ = function (u8, clusterTicks, keyOverride, onSample, durationTicks) {
   var r = new MkvByteReader(u8, 0);
   var trackNum = r.readVint(false);
   if (!trackNum) return;
@@ -393,9 +394,11 @@ MkvDemuxer.prototype.parseBlock_ = function (u8, clusterTicks, keyOverride, onSa
   // Laced frames share the block timestamp; audio decoders infer spacing from
   // the frame contents, and the muxer spaces them by the track's default
   // duration — so hand each frame an index for that.
+  var durationMs = durationTicks != null
+    ? durationTicks * this.timestampScale / 1e6 : null;
   for (var f = 0; f < frames.length; f++) {
     onSample(trackNum.value, { ptsMs: ptsMs, laceIndex: f, laceCount: frames.length,
-                               keyframe: keyframe, data: frames[f] });
+                               keyframe: keyframe, durationMs: durationMs, data: frames[f] });
   }
 };
 
@@ -797,6 +800,15 @@ function MkvEngine(url, audioTypeIndex, opts) {
   // Optional: move the ELEMENT's playhead (the engine has no element). Used
   // for gap hops — see stallCheck_.
   this.seekTo = opts.seekTo || null;
+  // Optional subtitle plumbing. The demuxer walks EVERY track's blocks
+  // anyway, so embedded text subtitles (S_TEXT/UTF8 = SRT, S_TEXT/ASS|SSA)
+  // are free to extract: onSubtitleTracks(list) announces the tracks once,
+  // onCue(typeIndex, startMs, endMs, text) streams cues as the pump reaches
+  // them. Pages own display (a <track> per typeIndex) and DEDUP — a repump
+  // re-emits the cues it re-reads.
+  this.onSubtitleTracks = opts.onSubtitleTracks || null;
+  this.onCue = opts.onCue || null;
+  this.subTracks_ = {};        // trackNumber -> {typeIndex, codecId}
   this.log = opts.log || function () {};
   this.startAt = opts.startAt || 0;
   this.mediaSource = new MediaSource();
@@ -841,6 +853,34 @@ MkvEngine.prototype.fatal_ = function (reason) {
 
 MkvEngine.prototype.sleep_ = function (ms) {
   return new Promise(function (resolve) { setTimeout(resolve, ms); });
+};
+
+// Decode one subtitle block into displayable text. SRT-in-MKV blocks ARE the
+// cue text; ASS/SSA blocks are one Dialogue line whose 9th field is the text
+// (commas inside it are literal), with {\override} tags stripped and \N as
+// the line break.
+MkvEngine.prototype.subtitleText_ = function (codecId, bytes) {
+  var raw = '';
+  try {
+    if (typeof TextDecoder !== 'undefined') {
+      raw = new TextDecoder('utf-8').decode(bytes);
+    } else {
+      // 2017 TVs: decode UTF-8 by hand via percent-escapes.
+      var s = '';
+      for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      raw = decodeURIComponent(escape(s));
+    }
+  } catch (e) { return null; }
+  raw = raw.replace(/ +$/, '');
+  if (codecId !== 'S_TEXT/UTF8') {
+    var parts = raw.split(',');
+    if (parts.length < 9) return null;
+    raw = parts.slice(8).join(',');
+    raw = raw.replace(/\{[^}]*\}/g, '');
+    raw = raw.replace(/\\N/g, '\n').replace(/\\n/g, '\n').replace(/\\h/g, ' ');
+  }
+  raw = raw.replace(/\s+$/, '');
+  return raw || null;
 };
 
 MkvEngine.prototype.abortInflight_ = function () {
@@ -1003,6 +1043,26 @@ MkvEngine.prototype.openLanes_ = function () {
     if (video) chosen.push(video);
     if (audio) chosen.push(audio);
     if (!chosen.length) { this.fatal_('no playable tracks'); return; }
+    // Embedded TEXT subtitles: announce them and remember which track
+    // numbers to turn into cues. Bitmap subs (PGS/VOBSUB) have no renderer
+    // here and are left out.
+    var subs = [], subIndex = 0;
+    for (i = 0; i < this.demux.tracks.length; i++) {
+      t = this.demux.tracks[i];
+      if (t.type !== 17) continue;
+      var isText = t.codecId === 'S_TEXT/UTF8' || t.codecId === 'S_TEXT/ASS' ||
+                   t.codecId === 'S_TEXT/SSA';
+      if (isText) {
+        this.subTracks_[t.number] = { typeIndex: subIndex, codecId: t.codecId };
+        subs.push({ typeIndex: subIndex, language: t.language || null,
+                    name: t.name || null, codecId: t.codecId });
+      }
+      subIndex++;   // typeIndex counts ALL subtitle tracks, matching the
+                    // sender's per-kind numbering even when bitmaps intervene
+    }
+    if (subs.length && this.onSubtitleTracks) {
+      try { this.onSubtitleTracks(subs); } catch (e) {}
+    }
     // Every lane is CREATED before anything is appended: setting duration
     // while a SourceBuffer is updating throws per spec — silently, inside
     // the old try/catch — and Safari (unlike Chrome, which falls back to the
@@ -1295,6 +1355,19 @@ MkvEngine.prototype.pump_ = function (startOffset) {
 
   // The demux callback, shared by every window this run parses.
   function onBlock(trackNum, raw) {
+    var sub = self.subTracks_[trackNum];
+    if (sub) {
+      if (self.onCue) {
+        var text = self.subtitleText_(sub.codecId, raw.data);
+        if (text) {
+          try {
+            self.onCue(sub.typeIndex, raw.ptsMs,
+                       raw.ptsMs + (raw.durationMs || 4000), text);
+          } catch (e) {}
+        }
+      }
+      return;
+    }
     var lane = self.lanes[trackNum];
     if (!lane) return;
     var isVideo = lane.track.type === 1;
