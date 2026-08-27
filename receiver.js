@@ -373,6 +373,21 @@ if (!PREVIEW) {
       // normalizer, measured: avc1.42E01E.pdl -> avc1.2a0NaN).
       const codecsAttr = streamCodecs;
       window.__dolbySplitActive = !!dolby;
+      // Plex writes NO token into playlist URIs, and relative resolution
+      // drops the master's query — so the media playlist, the fMP4
+      // EXT-X-MAP init ("base/header") and every segment go out tokenless.
+      // PMS answers tokenless requests with Access-Control-Allow-Origin
+      // pinned to app.plex.tv instead of reflecting this origin (measured
+      // 2026-08-27), which Shaka surfaces as error 1002 on the first init
+      // fetch. Auth never needed the token — CORS does. Re-attach it to
+      // everything under the transcode session.
+      const tokenMatch = /[?&]X-Plex-Token=([^&]+)/.exec(url);
+      const plexToken = tokenMatch ? tokenMatch[1] : '';
+      const withToken = (u) => {
+        if (!plexToken || u.indexOf('/transcode/universal/') < 0 ||
+            u.indexOf('X-Plex-Token=') >= 0) return u;
+        return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'X-Plex-Token=' + plexToken;
+      };
       playbackConfig.manifestHandler = (manifest) => {
         let out = manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
         if (codecsAttr && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
@@ -382,8 +397,11 @@ if (!PREVIEW) {
         }
         return out;
       };
+      playbackConfig.manifestRequestHandler = (request2) => {
+        request2.url = withToken(request2.url);
+      };
       playbackConfig.segmentRequestHandler = (request2) => {
-        request2.url = request2.url.replace('.ts.m4s', '.ts');
+        request2.url = withToken(request2.url.replace('.ts.m4s', '.ts'));
       };
       if (dolby) {
         playbackConfig.shakaConfig = { mediaSource: { forceTransmux: true } };
