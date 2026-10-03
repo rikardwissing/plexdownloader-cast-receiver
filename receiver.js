@@ -10,7 +10,7 @@
 //    in-browser (mp4box.js) and fed to MediaSource per-track — audio
 //    switches without the video reloading.
 //
-// ?preview=idle|loading renders those screens in a normal browser.
+// ?preview=idle|loading|error|upnext renders those screens in a normal browser.
 'use strict';
 
 const NS = 'urn:x-cast:dev.rikard.portage';
@@ -157,6 +157,37 @@ const Screens = {
   },
 };
 
+const UpNext = {
+  show(m) {
+    document.getElementById('un-label').textContent = m.label || 'Up next';
+    document.getElementById('un-title').textContent = m.title || '';
+    const sub = document.getElementById('un-sub');
+    sub.textContent = m.subtitle || '';
+    sub.style.display = m.subtitle ? '' : 'none';
+    const img = document.getElementById('un-img');
+    img.src = m.art || 'icon.png';
+    img.className = m.art ? '' : 'un-placeholder';
+    document.getElementById('upnext').classList.add('show');
+    this.ring(m.endsIn, m.total);
+  },
+  ring(endsIn, total) {
+    const ring = document.getElementById('un-ring');
+    if (endsIn == null || !total) { ring.style.display = 'none'; return; }
+    ring.style.display = '';
+    const length = ring.getTotalLength();
+    ring.style.transition = 'none';
+    ring.style.strokeDasharray = length + ' ' + length;
+    ring.style.strokeDashoffset = String(length * Math.max(0, Math.min(1, endsIn / total)));
+    ring.getBoundingClientRect();
+    ring.style.transition = 'stroke-dashoffset ' + endsIn + 's linear';
+    ring.style.strokeDashoffset = '0';
+  },
+  hide() {
+    const box = document.getElementById('upnext');
+    if (box) box.classList.remove('show');
+  },
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   Screens.boot();
   Screens.show('idle');
@@ -166,6 +197,10 @@ document.addEventListener('DOMContentLoaded', () => {
   } else if (PREVIEW === 'error') {
     Screens.error("Can't play this video",
                   "This device can't decode the video or audio format.");
+  } else if (PREVIEW === 'upnext') {
+    Screens.show('playback');
+    UpNext.show({ label: 'We suggest', title: 'S01E02 · The Big Actor', subtitle: 'Dragnet (1951)',
+                  art: null, endsIn: 7, total: 10 });
   }
 });
 
@@ -316,6 +351,7 @@ if (!PREVIEW) {
   // play/pause/time as usual. Everything else (packages, Dolby direct files)
   // keeps default playback.
   playerManager.setMessageInterceptor(messages.MessageType.LOAD, (request) => {
+    UpNext.hide();
     teardownEngine();
     const media = request.media || {};
     const custom = media.customData || {};
@@ -466,6 +502,7 @@ if (!PREVIEW) {
   // demux-error-on-immediate-recast pattern). Release at the moment playback
   // actually ends.
   playerManager.setMessageInterceptor(messages.MessageType.STOP, (request) => {
+    UpNext.hide();
     teardownEngine();
     return request;
   });
@@ -514,6 +551,8 @@ if (!PREVIEW) {
     if (msg.type === 'ping') {
       context.sendCustomMessage(NS, event.senderId,
                                 { type: 'pong', capabilities: capabilities() });
+    } else if (msg.type === 'upNext') {
+      if (msg.hide) UpNext.hide(); else UpNext.show(msg);
     } else if (msg.type === 'setAudioTrack' && engine) {
       if (typeof engine.setAudioTrack === 'function') {
         engine.setAudioTrack(msg.audioTypeIndex || 0);
