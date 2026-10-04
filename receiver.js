@@ -245,7 +245,7 @@ const Subs = {
   },
   select(typeIndex) {
     this.active = typeIndex;
-    if (lastLoad && lastLoad.custom) lastLoad.custom.subtitleTypeIndex = typeIndex;
+    if (lastLoad && lastLoad.url === this.key && lastLoad.custom) lastLoad.custom.subtitleTypeIndex = typeIndex;
     const track = this.tracks[typeIndex];
     if (track && track.url && !track.fetched) {
       track.fetched = true;
@@ -456,7 +456,8 @@ if (!PREVIEW) {
     teardownEngine();
     const media = request.media || {};
     const custom = media.customData || {};
-    if (!custom.mkvEngine) Subs.clear();
+    if (Array.isArray(custom.subtitles)) Subs.load(media.contentUrl || media.contentId || '', custom);
+    else Subs.clear();
     // A Plex HLS stream's segments are fMP4 (measured: ftyp iso5/dby1 brands,
     // sidx-opening) but NAMED ".ts", and the manifest declares no CODECS - so
     // Shaka guesses MPEG-TS from the extension and pushes fMP4 bytes through
@@ -579,7 +580,6 @@ if (!PREVIEW) {
       // natively. Seeks ride the SEEK interceptor into engine.reposition.
       const mkvUrl = media.contentUrl || media.contentId;
       lastLoad = { url: mkvUrl, media: Object.assign({}, media), custom };
-      Subs.load(mkvUrl, custom);
       engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
         getTime: () => playerManager.getCurrentTimeSec() || 0,
         seekTo: (s) => { try { playerManager.seek(s); } catch (e) {} },
