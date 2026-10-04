@@ -143,7 +143,16 @@
   #upnext .un-art { position: relative; width: 22vh; height: 12.4vh; flex: 0 0 auto; margin-right: 2vh; }
   #upnext .un-art img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: 1.1vh;
     background: rgba(255, 255, 255, 0.08); }
-  #upnext .un-art img.un-placeholder { object-fit: contain; opacity: 0.5; }
+  #upnext .un-noart { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: none; align-items: center;
+    justify-content: center; border-radius: 1.1vh;
+    background: radial-gradient(circle at 15% 0%, rgba(25, 216, 230, 0.42), rgba(25, 216, 230, 0) 62%),
+                radial-gradient(circle at 100% 100%, rgba(123, 69, 246, 0.5), rgba(123, 69, 246, 0) 64%), #12153A;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07); }
+  #upnext .un-noart span { display: flex; align-items: center; justify-content: center; width: 4.6vh; height: 4.6vh;
+    border-radius: 50%; background: rgba(11, 13, 34, 0.45); box-shadow: inset 0 0 0 1px rgba(244, 247, 255, 0.16); }
+  #upnext .un-noart svg { position: static; width: 2.1vh; height: 2.1vh; margin-left: 0.3vh; overflow: visible; }
+  #upnext .un-art.noart .un-noart { display: flex; }
+  #upnext .un-art.noart img { display: none; }
   #upnext svg { position: absolute; top: -0.55vh; left: -0.55vh; width: 23.1vh; height: 13.5vh; overflow: visible; }
   #un-ring { fill: none; stroke: rgb(25, 216, 230); stroke-width: 3; stroke-linecap: round; }
   #upnext .un-text { max-width: 40vh; }
@@ -161,7 +170,7 @@
   <!-- Version badge lives INSIDE the idle screen so it hides with it —
        position:fixed still pins it to the corner while idle shows. -->
   <div style="position:fixed;right:10px;bottom:8px;font-size:1.2vh;letter-spacing:0.05em;
-              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-03.1</div>
+              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-04.1</div>
   <img class="mark" src="icon.png" alt="">
   <p class="wordmark">Portage</p>
   <h1 class="headline">Ready to cast</h1>
@@ -186,6 +195,7 @@
 <div id="upnext">
   <div class="un-art">
     <img id="un-img" alt="">
+    <div class="un-noart"><span><svg viewBox="0 0 24 24"><path d="M8 5.6v12.8c0 .8.9 1.3 1.6.9l10-6.4c.6-.4.6-1.4 0-1.8l-10-6.4C8.9 4.3 8 4.8 8 5.6z" fill="#F4F7FF"/></svg></span></div>
     <svg viewBox="0 0 168 98" preserveAspectRatio="none"><path id="un-ring" d="M14,2 H154 A12,12 0 0 1 166,14 V84 A12,12 0 0 1 154,96 H14 A12,12 0 0 1 2,84 V14 A12,12 0 0 1 14,2 Z"/></svg>
   </div>
   <div class="un-text">
@@ -217,13 +227,13 @@ window.__dolbySplitActive = false;
 })();
 </script>
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-<script src="mp4box.all.min.js?v=2026-10-03.1"></script>
+<script src="mp4box.all.min.js?v=2026-10-04.1"></script>
 <!-- The MSE engine, shared verbatim with the WebRTC and LAN receivers and
      copied here by scripts/build-hosted-receiver.sh in the app repo. Must load
      BEFORE receiver.js, which hands it its host hooks the moment it runs. -->
-<script src="tv-mse.js?v=2026-10-03.1"></script>
-<script src="mkv-engine.js?v=2026-10-03.1"></script>
-<script src="fmp4-split.js?v=2026-10-03.1"></script>
-<script src="receiver.js?v=2026-10-03.1"></script>
+<script src="tv-mse.js?v=2026-10-04.1"></script>
+<script src="mkv-engine.js?v=2026-10-04.1"></script>
+<script src="fmp4-split.js?v=2026-10-04.1"></script>
+<script src="receiver.js?v=2026-10-04.1"></script>
 </body>
 </html>

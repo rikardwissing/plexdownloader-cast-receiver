@@ -165,8 +165,8 @@ const UpNext = {
     sub.textContent = m.subtitle || '';
     sub.style.display = m.subtitle ? '' : 'none';
     const img = document.getElementById('un-img');
-    img.src = m.art || 'icon.png';
-    img.className = m.art ? '' : 'un-placeholder';
+    if (m.art) img.src = m.art; else img.removeAttribute('src');
+    img.parentNode.className = m.art ? 'un-art' : 'un-art noart';
     document.getElementById('upnext').classList.add('show');
     this.ring(m.endsIn, m.total);
   },
