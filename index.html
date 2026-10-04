@@ -37,6 +37,16 @@
     /* Brands the stock surfaces we don't draw ourselves. */
     --logo-image: url(icon.png);
   }
+  #subs {
+    position: absolute; left: 6vw; right: 6vw; bottom: 9vh; z-index: 15;
+    text-align: center; pointer-events: none;
+  }
+  #subs span {
+    font-size: 4.6vh; font-weight: 500; line-height: 1.42; white-space: pre-line;
+    color: #fff; background: rgba(0, 0, 0, 0.62); padding: 0.2vh 1vh; border-radius: 0.6vh;
+    -webkit-box-decoration-break: clone; box-decoration-break: clone;
+    text-shadow: 0 0.2vh 0.5vh rgba(0, 0, 0, 0.55);
+  }
   video#mse {
     position: absolute; top: 0; left: 0; right: 0; bottom: 0;
     width: 100%; height: 100%; background: #000; display: none;
@@ -174,13 +184,14 @@
 </head>
 <body>
 <cast-media-player></cast-media-player>
+<div id="subs"></div>
 <video id="mse" autoplay playsinline></video>
 
 <div id="idle" class="screen">
   <!-- Version badge lives INSIDE the idle screen so it hides with it —
        position:fixed still pins it to the corner while idle shows. -->
   <div style="position:fixed;right:10px;bottom:8px;font-size:1.2vh;letter-spacing:0.05em;
-              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-04.2</div>
+              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-04.3</div>
   <img class="mark" src="icon.png" alt="">
   <p class="wordmark">Portage</p>
   <h1 class="headline">Ready to cast</h1>
@@ -237,13 +248,13 @@ window.__dolbySplitActive = false;
 })();
 </script>
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-<script src="mp4box.all.min.js?v=2026-10-04.2"></script>
+<script src="mp4box.all.min.js?v=2026-10-04.3"></script>
 <!-- The MSE engine, shared verbatim with the WebRTC and LAN receivers and
      copied here by scripts/build-hosted-receiver.sh in the app repo. Must load
      BEFORE receiver.js, which hands it its host hooks the moment it runs. -->
-<script src="tv-mse.js?v=2026-10-04.2"></script>
-<script src="mkv-engine.js?v=2026-10-04.2"></script>
-<script src="fmp4-split.js?v=2026-10-04.2"></script>
-<script src="receiver.js?v=2026-10-04.2"></script>
+<script src="tv-mse.js?v=2026-10-04.3"></script>
+<script src="mkv-engine.js?v=2026-10-04.3"></script>
+<script src="fmp4-split.js?v=2026-10-04.3"></script>
+<script src="receiver.js?v=2026-10-04.3"></script>
 </body>
 </html>

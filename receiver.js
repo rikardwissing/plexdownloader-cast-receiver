@@ -131,6 +131,8 @@ const Screens = {
   },
   show(name) {
     clearTimeout(this.errorTimer);
+    const subs = document.getElementById('subs');
+    if (subs) subs.style.visibility = name === 'playback' ? '' : 'hidden';
     this.els.idle.style.display = name === 'idle' ? 'flex' : 'none';
     this.els.loading.style.display = name === 'loading' ? 'flex' : 'none';
     this.els.error.style.display = name === 'error' ? 'flex' : 'none';
@@ -188,6 +190,102 @@ const UpNext = {
   },
 };
 
+function vttSeconds(stamp) {
+  const parts = stamp.replace(',', '.').split(':').map(Number);
+  return parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+}
+
+function parseVtt(text) {
+  const cues = [];
+  for (const block of String(text).replace(/\r/g, '').split(/\n{2,}/)) {
+    const lines = block.split('\n');
+    const at = lines.findIndex((line) => line.indexOf('-->') >= 0);
+    if (at < 0) continue;
+    const m = lines[at].match(/([\d:.,]+)\s*-->\s*([\d:.,]+)/);
+    if (!m) continue;
+    const body = Subs.clean(lines.slice(at + 1).join('\n'));
+    if (body) cues.push({ s: vttSeconds(m[1]), e: vttSeconds(m[2]), text: body });
+  }
+  return cues;
+}
+
+const Subs = {
+  key: null,
+  tracks: {},
+  engineToType: {},
+  active: -1,
+  shown: '',
+  timer: null,
+  load(url, custom) {
+    if (url !== this.key) { this.key = url; this.tracks = {}; }
+    this.engineToType = {};
+    const list = Array.isArray(custom.subtitles) ? custom.subtitles : [];
+    for (const sub of list) {
+      const track = this.tracks[sub.typeIndex] ||
+        (this.tracks[sub.typeIndex] = { cues: [], seen: {}, url: null, fetched: false });
+      if (typeof sub.engineIndex === 'number') this.engineToType[sub.engineIndex] = sub.typeIndex;
+      if (sub.url) track.url = sub.url;
+    }
+    this.select(typeof custom.subtitleTypeIndex === 'number' ? custom.subtitleTypeIndex : -1);
+  },
+  clear() {
+    this.key = null;
+    this.tracks = {};
+    this.engineToType = {};
+    this.select(-1);
+  },
+  engineCue(engineIndex, startMs, endMs, text) {
+    const track = this.tracks[this.engineToType[engineIndex]];
+    if (!track) return;
+    const seenKey = Math.round(startMs) + '|' + text;
+    if (track.seen[seenKey]) return;
+    track.seen[seenKey] = 1;
+    const body = this.clean(text);
+    if (body) track.cues.push({ s: startMs / 1000, e: endMs / 1000, text: body });
+  },
+  select(typeIndex) {
+    this.active = typeIndex;
+    if (lastLoad && lastLoad.custom) lastLoad.custom.subtitleTypeIndex = typeIndex;
+    const track = this.tracks[typeIndex];
+    if (track && track.url && !track.fetched) {
+      track.fetched = true;
+      fetch(track.url)
+        .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+        .then((vtt) => {
+          track.cues = track.cues.concat(parseVtt(vtt));
+          slog('subtitles: ' + track.cues.length + ' cues from sidecar #' + typeIndex);
+        })
+        .catch((e) => { track.fetched = false; slog('subtitle sidecar #' + typeIndex + ' failed: ' + e); });
+    }
+    clearInterval(this.timer);
+    this.timer = null;
+    if (typeIndex >= 0 && playerManager) this.timer = setInterval(() => this.tick(), 200);
+    this.paint('');
+  },
+  tick() {
+    const track = this.tracks[this.active];
+    if (!track) { this.paint(''); return; }
+    const now = playerManager.getCurrentTimeSec() || 0;
+    const lines = [];
+    for (const cue of track.cues) if (cue.s <= now && now < cue.e) lines.push(cue.text);
+    this.paint(lines.join('\n'));
+  },
+  paint(text) {
+    if (text === this.shown) return;
+    this.shown = text;
+    const box = document.getElementById('subs');
+    if (!box) return;
+    box.textContent = '';
+    if (!text) return;
+    const line = document.createElement('span');
+    line.textContent = text;
+    box.appendChild(line);
+  },
+  clean(text) {
+    return String(text).replace(/<[^>]+>/g, '').replace(/\\N/g, '\n').trim();
+  },
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   Screens.boot();
   Screens.show('idle');
@@ -197,6 +295,9 @@ document.addEventListener('DOMContentLoaded', () => {
   } else if (PREVIEW === 'error') {
     Screens.error("Can't play this video",
                   "This device can't decode the video or audio format.");
+  } else if (PREVIEW === 'subtitles') {
+    Screens.show('playback');
+    Subs.paint("We'll need to see the receipts.\nAll of them.");
   } else if (PREVIEW === 'upnext') {
     Screens.show('playback');
     UpNext.show({ label: 'We suggest', title: 'S01E02 · The Big Actor', subtitle: 'Dragnet (1951)',
@@ -355,6 +456,7 @@ if (!PREVIEW) {
     teardownEngine();
     const media = request.media || {};
     const custom = media.customData || {};
+    if (!custom.mkvEngine) Subs.clear();
     // A Plex HLS stream's segments are fMP4 (measured: ftyp iso5/dby1 brands,
     // sidx-opening) but NAMED ".ts", and the manifest declares no CODECS - so
     // Shaka guesses MPEG-TS from the extension and pushes fMP4 bytes through
@@ -477,15 +579,19 @@ if (!PREVIEW) {
       // natively. Seeks ride the SEEK interceptor into engine.reposition.
       const mkvUrl = media.contentUrl || media.contentId;
       lastLoad = { url: mkvUrl, media: Object.assign({}, media), custom };
+      Subs.load(mkvUrl, custom);
       engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
         getTime: () => playerManager.getCurrentTimeSec() || 0,
         seekTo: (s) => { try { playerManager.seek(s); } catch (e) {} },
         log: slog,
         startAt: request.currentTime || 0,
+        onSubtitleTracks: (list) => slog('mkv engine: ' + list.length + ' embedded text subtitle tracks'),
+        onCue: (index, startMs, endMs, text) => Subs.engineCue(index, startMs, endMs, text),
       });
       engine.onEngineFailed = (reason) => {
         slog('mkv engine failed: ' + reason);
         teardownEngine();
+        Subs.clear();
         Screens.error("Can't play this video", String(reason));
       };
       media.contentUrl = engine.objectUrl;
@@ -504,6 +610,7 @@ if (!PREVIEW) {
   playerManager.setMessageInterceptor(messages.MessageType.STOP, (request) => {
     UpNext.hide();
     teardownEngine();
+    Subs.clear();
     return request;
   });
 
@@ -553,6 +660,8 @@ if (!PREVIEW) {
                                 { type: 'pong', capabilities: capabilities() });
     } else if (msg.type === 'upNext') {
       if (msg.hide) UpNext.hide(); else UpNext.show(msg);
+    } else if (msg.type === 'setSubtitle') {
+      Subs.select(typeof msg.typeIndex === 'number' ? msg.typeIndex : -1);
     } else if (msg.type === 'setAudioTrack' && engine) {
       if (typeof engine.setAudioTrack === 'function') {
         engine.setAudioTrack(msg.audioTypeIndex || 0);
