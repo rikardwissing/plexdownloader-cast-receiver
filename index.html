@@ -94,10 +94,20 @@
     border-radius: 1.6vh;
     box-shadow: 0 3vh 9vh rgba(0,0,0,0.6);
   }
-  /* No artwork: the mark stands in, so the screen still reads as ours. */
   #loading .poster.empty { display: none; }
-  #loading .placeholder { display: none; }
-  #loading .poster.empty ~ .placeholder { display: block; }
+  #loading .placeholder {
+    display: none; align-items: center; justify-content: center;
+    width: 64vh; height: 36vh; border-radius: 1.6vh;
+    background: radial-gradient(circle at 15% 0%, rgba(25, 216, 230, 0.42), rgba(25, 216, 230, 0) 62%),
+                radial-gradient(circle at 100% 100%, rgba(123, 69, 246, 0.5), rgba(123, 69, 246, 0) 64%), #12153A;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07), 0 3vh 9vh rgba(0, 0, 0, 0.6);
+  }
+  #loading .placeholder span {
+    display: flex; align-items: center; justify-content: center; width: 13.3vh; height: 13.3vh;
+    border-radius: 50%; background: rgba(11, 13, 34, 0.45); box-shadow: inset 0 0 0 1px rgba(244, 247, 255, 0.16);
+  }
+  #loading .placeholder svg { width: 5.9vh; height: 5.9vh; margin-left: 0.8vh; }
+  #loading .poster.empty ~ .placeholder { display: flex; }
   #loading .title {
     margin: 3.2vh 0 0;
     font-size: 3.2vh; font-weight: 600; max-width: 74vw;
@@ -170,7 +180,7 @@
   <!-- Version badge lives INSIDE the idle screen so it hides with it —
        position:fixed still pins it to the corner while idle shows. -->
   <div style="position:fixed;right:10px;bottom:8px;font-size:1.2vh;letter-spacing:0.05em;
-              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-04.1</div>
+              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-04.2</div>
   <img class="mark" src="icon.png" alt="">
   <p class="wordmark">Portage</p>
   <h1 class="headline">Ready to cast</h1>
@@ -180,7 +190,7 @@
 <div id="loading" class="screen">
   <div class="watermark"><img src="icon.png" alt=""><span>Portage</span></div>
   <img class="poster empty" alt="">
-  <img class="placeholder mark" src="icon.png" alt="">
+  <div class="placeholder"><span><svg viewBox="0 0 24 24"><path d="M8 5.6v12.8c0 .8.9 1.3 1.6.9l10-6.4c.6-.4.6-1.4 0-1.8l-10-6.4C8.9 4.3 8 4.8 8 5.6z" fill="#F4F7FF"/></svg></span></div>
   <div class="title"></div>
   <div class="spinner"></div>
 </div>
@@ -227,13 +237,13 @@ window.__dolbySplitActive = false;
 })();
 </script>
 <script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-<script src="mp4box.all.min.js?v=2026-10-04.1"></script>
+<script src="mp4box.all.min.js?v=2026-10-04.2"></script>
 <!-- The MSE engine, shared verbatim with the WebRTC and LAN receivers and
      copied here by scripts/build-hosted-receiver.sh in the app repo. Must load
      BEFORE receiver.js, which hands it its host hooks the moment it runs. -->
-<script src="tv-mse.js?v=2026-10-04.1"></script>
-<script src="mkv-engine.js?v=2026-10-04.1"></script>
-<script src="fmp4-split.js?v=2026-10-04.1"></script>
-<script src="receiver.js?v=2026-10-04.1"></script>
+<script src="tv-mse.js?v=2026-10-04.2"></script>
+<script src="mkv-engine.js?v=2026-10-04.2"></script>
+<script src="fmp4-split.js?v=2026-10-04.2"></script>
+<script src="receiver.js?v=2026-10-04.2"></script>
 </body>
 </html>
