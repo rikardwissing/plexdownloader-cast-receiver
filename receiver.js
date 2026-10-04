@@ -590,6 +590,7 @@ if (!PREVIEW) {
       });
       engine.onEngineFailed = (reason) => {
         slog('mkv engine failed: ' + reason);
+        clearLoadWatch();
         teardownEngine();
         Subs.clear();
         Screens.error("Can't play this video", String(reason));
