@@ -190,6 +190,139 @@ const UpNext = {
   },
 };
 
+function broadcast(msg) {
+  if (PREVIEW) return;
+  try { context.sendCustomMessage(NS, undefined, msg); } catch (e) {}
+}
+
+function fillTemplate(text, values) {
+  return String(text).replace(/\{(state|ms|ticks|paused)\}/g, (_, key) => String(values[key]));
+}
+
+function fireRequest(request, values, what) {
+  if (!request || !request.url) return;
+  const init = { method: request.method || 'GET', credentials: 'omit', keepalive: true };
+  if (request.body) {
+    init.body = fillTemplate(request.body, values);
+    init.headers = { 'Content-Type': 'application/json' };
+  }
+  fetch(fillTemplate(request.url, values), init)
+    .then((r) => { if (!r.ok) slog('report ' + what + ' answered ' + r.status); })
+    .catch((e) => slog('report ' + what + ' failed: ' + e));
+}
+
+const Report = {
+  info: null,
+  position: 0,
+  state: null,
+  sentAt: 0,
+  timer: null,
+  begin(info) {
+    if (info && this.info && info.key === this.info.key) return;
+    this.end();
+    if (!info) return;
+    this.info = info;
+    this.position = 0;
+    this.state = null;
+    this.sentAt = 0;
+    this.timer = setInterval(() => this.tick(), 1000);
+  },
+  tick() {
+    if (!this.info || PREVIEW) return;
+    let state = null;
+    try { state = playerManager.getPlayerState(); } catch (e) {}
+    const states = cast.framework.messages.PlayerState;
+    if (state !== states.PLAYING && state !== states.PAUSED) return;
+    this.position = playerManager.getCurrentTimeSec() || this.position;
+    const next = state === states.PLAYING ? 'playing' : 'paused';
+    if (next !== this.state || Date.now() - this.sentAt >= 10000) this.send(next);
+  },
+  values(state) {
+    const ms = Math.max(0, Math.round(this.position * 1000));
+    return { state, ms, ticks: ms * 10000, paused: state === 'paused' };
+  },
+  send(state) {
+    if (!this.info) return;
+    this.state = state;
+    this.sentAt = Date.now();
+    fireRequest(this.info.progress, this.values(state), state);
+  },
+  end() {
+    const info = this.info;
+    if (!info) return;
+    clearInterval(this.timer);
+    this.timer = null;
+    this.info = null;
+    const values = this.values('stopped');
+    fireRequest(info.stopped || info.progress, values, 'stopped');
+    const watched = info.durationMs > 0 && values.ms >= info.durationMs * 0.9;
+    if (watched) fireRequest(info.watched, values, 'watched');
+    fireRequest(info.stop, values, 'session stop');
+    slog('report end ' + info.key + ' at ' + Math.round(values.ms / 1000) + 's' + (watched ? ' (watched)' : ''));
+  },
+};
+
+const Queue = {
+  items: [],
+  countdownSeconds: 10,
+  countdown: null,
+  advancing: null,
+  asking: null,
+  get active() { return this.items.length > 0 || !!this.countdown || !!this.asking; },
+  set(msg) {
+    this.items = Array.isArray(msg.items) ? msg.items : [];
+    if (typeof msg.countdown === 'number') this.countdownSeconds = msg.countdown;
+    if (msg.current && msg.current.report) Report.begin(msg.current.report);
+    slog('queue: ' + this.items.length + ' ahead');
+  },
+  clear() {
+    this.items = [];
+    this.advancing = null;
+    this.asking = null;
+    if (this.countdown) { clearTimeout(this.countdown); this.countdown = null; }
+  },
+  ended() {
+    Report.end();
+    const next = this.items[0];
+    if (!next) return false;
+    if (next.autoplay === false) {
+      this.load(this.items.shift());
+      return true;
+    }
+    const card = next.card || {};
+    UpNext.show({ label: card.label, title: card.title, subtitle: card.subtitle, art: card.art,
+                  endsIn: this.countdownSeconds, total: this.countdownSeconds });
+    this.countdown = setTimeout(() => {
+      this.countdown = null;
+      const item = this.items.shift();
+      if (item) this.load(item);
+    }, this.countdownSeconds * 1000);
+    return true;
+  },
+  load(item) {
+    this.advancing = item.key;
+    this.asking = item.autoplay === false ? (item.card || {}) : null;
+    const request = new cast.framework.messages.LoadRequestData();
+    request.media = item.media;
+    request.autoplay = item.autoplay !== false;
+    request.currentTime = item.startAt || 0;
+    slog('queue advance: ' + item.key + (this.asking ? ' (asks first)' : ''));
+    broadcast({ type: 'queueAdvanced', key: item.key, asks: !!this.asking });
+    playerManager.load(request);
+  },
+  loaded() {
+    if (!this.asking) return;
+    UpNext.show({ label: 'Still watching?', title: this.asking.title,
+                  subtitle: this.asking.subtitle, art: this.asking.art });
+  },
+  playing() {
+    if (!this.asking) return;
+    this.asking = null;
+    UpNext.hide();
+    broadcast({ type: 'stillWatchingAnswered' });
+  },
+};
+
 function vttSeconds(stamp) {
   const parts = stamp.replace(',', '.').split(':').map(Number);
   return parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
@@ -360,6 +493,7 @@ let engine = null;
 // The load as the SENDER sent it — the interceptor rewrites contentUrl to a blob,
 // so the original has to be kept to re-issue it.
 let lastLoad = null;
+let reissuing = false;
 
 function teardownEngine() {
   if (engine) { try { engine.destroy(); } catch (e) {} engine = null; }
@@ -384,6 +518,7 @@ function reissue({ audioTypeIndex, withEngine = true }) {
   request.currentTime = at;
   slog('reissue at ' + Math.round(at) + 's audio#' +
        (custom.audioTypeIndex || 0) + (withEngine ? '' : ' (no engine)'));
+  reissuing = true;
   playerManager.load(request);
 }
 
@@ -452,10 +587,17 @@ if (!PREVIEW) {
   // play/pause/time as usual. Everything else (packages, Dolby direct files)
   // keeps default playback.
   playerManager.setMessageInterceptor(messages.MessageType.LOAD, (request) => {
-    UpNext.hide();
     teardownEngine();
     const media = request.media || {};
     const custom = media.customData || {};
+    const isReissue = reissuing;
+    reissuing = false;
+    const ownAdvance = !!custom.queueKey && custom.queueKey === Queue.advancing;
+    const sameItem = !!custom.report && !!Report.info && custom.report.key === Report.info.key;
+    if (!ownAdvance && !sameItem && !isReissue) Queue.clear();
+    Queue.advancing = null;
+    if (!Queue.asking) UpNext.hide();
+    if (!isReissue) Report.begin(custom.report);
     if (Array.isArray(custom.subtitles)) Subs.load(media.contentUrl || media.contentId || '', custom);
     else Subs.clear();
     // A Plex HLS stream's segments are fMP4 (measured: ftyp iso5/dby1 brands,
@@ -610,6 +752,8 @@ if (!PREVIEW) {
   // actually ends.
   playerManager.setMessageInterceptor(messages.MessageType.STOP, (request) => {
     UpNext.hide();
+    Queue.clear();
+    Report.end();
     teardownEngine();
     Subs.clear();
     return request;
@@ -628,9 +772,11 @@ if (!PREVIEW) {
   // engine cast in the field). The LOAD interceptor is the teardown point.
 
   let wantStreamSubtitle = false;
+  playerManager.addEventListener(events.EventType.PLAYING, () => Queue.playing());
   playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE, () => {
     clearLoadWatch();
     Screens.show('playback');
+    Queue.loaded();
     if (wantStreamSubtitle) {
       try {
         const ttMgr = playerManager.getTextTracksManager();
@@ -644,8 +790,12 @@ if (!PREVIEW) {
       } catch (e) { slog('stream subtitle activation failed: ' + e); }
     }
   });
-  playerManager.addEventListener(events.EventType.MEDIA_FINISHED,
-                                 () => Screens.show('idle'));
+  playerManager.addEventListener(events.EventType.MEDIA_FINISHED, (e) => {
+    const reason = e && e.endedReason;
+    if (reason === events.EndedReason.END_OF_STREAM && Queue.ended()) return;
+    if (reason !== events.EndedReason.INTERRUPTED) Report.end();
+    Screens.show('idle');
+  });
   playerManager.addEventListener(events.EventType.ERROR, (e) => {
     clearLoadWatch();
     const code = (e && e.detailedErrorCode) || 0;
@@ -660,7 +810,15 @@ if (!PREVIEW) {
       context.sendCustomMessage(NS, event.senderId,
                                 { type: 'pong', capabilities: capabilities() });
     } else if (msg.type === 'upNext') {
+      if (Queue.active) return;
       if (msg.hide) UpNext.hide(); else UpNext.show(msg);
+    } else if (msg.type === 'queue') {
+      Queue.set(msg);
+    } else if (msg.type === 'queueState') {
+      context.sendCustomMessage(NS, event.senderId, {
+        type: 'queueState', current: Report.info ? Report.info.key : null,
+        items: Queue.items.map((item) => item.key), asking: !!Queue.asking,
+      });
     } else if (msg.type === 'setSubtitle') {
       Subs.select(typeof msg.typeIndex === 'number' ? msg.typeIndex : -1);
     } else if (msg.type === 'setAudioTrack' && engine) {
