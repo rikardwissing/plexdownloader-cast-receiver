@@ -262,6 +262,8 @@ const Report = {
   },
 };
 
+const Playing = { contentId: null, title: null };
+
 const Queue = {
   items: [],
   countdownSeconds: 10,
@@ -597,7 +599,11 @@ if (!PREVIEW) {
     if (!ownAdvance && !sameItem && !isReissue) Queue.clear();
     Queue.advancing = null;
     if (!Queue.asking) UpNext.hide();
-    if (!isReissue) Report.begin(custom.report);
+    if (!isReissue) {
+      Report.begin(custom.report);
+      Playing.contentId = media.contentId || media.contentUrl || null;
+      Playing.title = (media.metadata && media.metadata.title) || null;
+    }
     if (Array.isArray(custom.subtitles)) Subs.load(media.contentUrl || media.contentId || '', custom);
     else Subs.clear();
     // A Plex HLS stream's segments are fMP4 (measured: ftyp iso5/dby1 brands,
@@ -815,9 +821,12 @@ if (!PREVIEW) {
     } else if (msg.type === 'queue') {
       Queue.set(msg);
     } else if (msg.type === 'queueState') {
+      let position = 0;
+      try { position = playerManager.getCurrentTimeSec() || 0; } catch (e) {}
       context.sendCustomMessage(NS, event.senderId, {
         type: 'queueState', current: Report.info ? Report.info.key : null,
-        items: Queue.items.map((item) => item.key), asking: !!Queue.asking,
+        contentId: Report.info ? Playing.contentId : null, title: Report.info ? Playing.title : null,
+        position, items: Queue.items.map((item) => item.key), asking: !!Queue.asking,
       });
     } else if (msg.type === 'setSubtitle') {
       Subs.select(typeof msg.typeIndex === 'number' ? msg.typeIndex : -1);
