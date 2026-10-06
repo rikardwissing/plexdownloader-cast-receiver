@@ -844,11 +844,11 @@ MkvEngine.prototype.destroy = function () {
   try { URL.revokeObjectURL(this.objectUrl); } catch (e) {}
 };
 
-MkvEngine.prototype.fatal_ = function (reason) {
+MkvEngine.prototype.fatal_ = function (reason, detail) {
   if (this.dead) return;
   this.dead = true;
   this.log('mkvengine fatal: ' + reason);
-  if (this.onEngineFailed) { try { this.onEngineFailed(String(reason)); } catch (e) {} }
+  if (this.onEngineFailed) { try { this.onEngineFailed(String(reason), detail || null); } catch (e) {} }
 };
 
 MkvEngine.prototype.sleep_ = function (ms) {
@@ -1012,7 +1012,8 @@ MkvEngine.prototype.openLanes_ = function () {
       if (t.type === 2) audioTracks.push(t);
     }
     if (video && !this.trackSupported_(video)) {
-      this.fatal_('this device cannot decode the video (' + this.trackCodec_(video) + ')');
+      this.fatal_('this device cannot decode the video (' + this.trackCodec_(video) + ')',
+                  { track: 'video', codecs: [this.trackCodec_(video)] });
       return;
     }
     var audio = null;
@@ -1031,7 +1032,8 @@ MkvEngine.prototype.openLanes_ = function () {
           var c = this.trackCodec_(audioTracks[i]);
           if (codecs.indexOf(c) < 0) codecs.push(c);
         }
-        this.fatal_('this device cannot decode the audio (' + codecs.join(', ') + ')');
+        this.fatal_('this device cannot decode the audio (' + codecs.join(', ') + ')',
+                    { track: 'audio', codecs: codecs });
         return;
       }
       if (audio !== audioTracks[want]) {

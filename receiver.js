@@ -112,6 +112,24 @@ function slog(msg) {
   catch (e) { /* no sender connected */ }
 }
 
+function reportLoadFailed(reason, detail) {
+  if (PREVIEW) return;
+  const message = Object.assign({ type: 'loadFailed', reason: String(reason) }, detail || {});
+  try { context.sendCustomMessage(NS, undefined, message); } catch (e) {}
+}
+
+const CODEC_NAMES = { 'ec-3': 'Dolby Digital Plus', 'ac-3': 'Dolby Digital', 'A_DTS': 'DTS',
+                      'A_TRUEHD': 'Dolby TrueHD', 'A_EAC3': 'Dolby Digital Plus', 'A_AC3': 'Dolby Digital' };
+function codecLabel(codec) {
+  const c = String(codec || '');
+  if (CODEC_NAMES[c]) return CODEC_NAMES[c];
+  if (/^(hvc1|hev1)/.test(c)) return 'HEVC';
+  if (/^(avc1|avc3)/.test(c)) return 'H.264';
+  if (/^vp09/.test(c)) return 'VP9';
+  if (/^av01/.test(c)) return 'AV1';
+  return c.replace(/^[AV]_/, '');
+}
+
 // ------------------------------------------------------------ brand screens
 // Idle and loading only — playback is entirely the stock player's.
 
@@ -576,6 +594,7 @@ if (!PREVIEW) {
       if (state === messages.PlayerState.PLAYING ||
           state === messages.PlayerState.PAUSED) return;
       slog('load watchdog: still ' + state + ' after 45s - giving up');
+      reportLoadFailed('the stream never started (still ' + state + ' after 45s)', { track: 'stream' });
       Screens.error("Can't play this video",
         'The stream never started. Its audio or video is likely a format ' +
         'this TV can\'t play in a stream - Dolby audio only plays from a ' +
@@ -736,12 +755,17 @@ if (!PREVIEW) {
         onSubtitleTracks: (list) => slog('mkv engine: ' + list.length + ' embedded text subtitle tracks'),
         onCue: (index, startMs, endMs, text) => Subs.engineCue(index, startMs, endMs, text),
       });
-      engine.onEngineFailed = (reason) => {
+      engine.onEngineFailed = (reason, detail) => {
         slog('mkv engine failed: ' + reason);
         clearLoadWatch();
         teardownEngine();
         Subs.clear();
-        Screens.error("Can't play this video", String(reason));
+        const names = detail && detail.codecs ? detail.codecs.map(codecLabel).join(', ') : '';
+        Screens.error("Can't play this video", detail && names
+          ? 'This device can\'t play ' + names + ' ' + detail.track + '.'
+          : String(reason));
+        reportLoadFailed(reason, detail);
+        try { playerManager.stop(); } catch (e) {}
       };
       media.contentUrl = engine.objectUrl;
       media.contentId = engine.objectUrl;
