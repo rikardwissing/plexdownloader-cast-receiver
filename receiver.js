@@ -46,6 +46,22 @@ function canDisplaySize(codecs, width, height) {
   });
 }
 
+const DISPLAY_SIZES = [
+  { height: 2160, width: 3840, codecs: ['hvc1.1.6.L150.90', 'avc1.640033'] },
+  { height: 1080, width: 1920, codecs: ['avc1.640028', 'hvc1.1.6.L120.90'] },
+  { height: 720, width: 1280, codecs: ['avc1.64001F'] },
+];
+
+function canDisplayHeight(height) {
+  const size = DISPLAY_SIZES.find((s) => s.height === height);
+  return canDisplaySize(size.codecs, size.width, size.height);
+}
+
+function maxDisplayHeight() {
+  const fit = DISPLAY_SIZES.find((s) => canDisplaySize(s.codecs, s.width, s.height));
+  return fit ? fit.height : 480;
+}
+
 // Whether addSourceBuffer ACCEPTS the muxed Dolby type that isTypeSupported
 // and canDisplayType both refuse (measured). The two layers can disagree, and
 // which one is telling the truth decides whether a capability shim can walk
@@ -81,9 +97,9 @@ function capabilities() {
     canDisplayAC3: canDisplay('audio/mp4', 'ac-3'),
     canDisplayEC3: canDisplay('audio/mp4', 'ec-3'),
     canDisplayHEVC: canDisplay('video/mp4', 'hvc1.2.4.L120.90'),
-    display720: canDisplaySize(['avc1.64001F'], 1280, 720),
-    display1080: canDisplaySize(['avc1.640028', 'hvc1.1.6.L120.90'], 1920, 1080),
-    display2160: canDisplaySize(['hvc1.1.6.L150.90', 'avc1.640033'], 3840, 2160),
+    display720: canDisplayHeight(720),
+    display1080: canDisplayHeight(1080),
+    display2160: canDisplayHeight(2160),
     // The COMBINED muxed-variant question, which the separate answers above
     // cannot settle: an HLS stream is one muxed variant, so Shaka's support
     // filter asks about video/mp4 with BOTH codecs at once - and a platform
@@ -622,6 +638,17 @@ if (!PREVIEW) {
     const custom = media.customData || {};
     const isReissue = reissuing;
     reissuing = false;
+    const videoHeight = Number(custom.videoHeight) || 0;
+    const displayHeight = videoHeight > 0 ? maxDisplayHeight() : 0;
+    if (videoHeight > displayHeight) {
+      slog('load refused: ' + videoHeight + 'p video, the display plays up to ' + displayHeight + 'p');
+      clearLoadWatch();
+      Subs.clear();
+      Screens.error("Can't play this video", 'This screen plays video up to ' + displayHeight + 'p.');
+      reportLoadFailed('display', { track: 'video', maxHeight: displayHeight });
+      try { playerManager.stop(); } catch (e) {}
+      return null;
+    }
     const ownAdvance = !!custom.queueKey && custom.queueKey === Queue.advancing;
     const sameItem = !!custom.report && !!Report.info && custom.report.key === Report.info.key;
     if (!ownAdvance && !sameItem && !isReissue) Queue.clear();
