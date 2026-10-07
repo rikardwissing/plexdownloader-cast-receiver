@@ -808,6 +808,9 @@ function MkvEngine(url, audioTypeIndex, opts) {
   // re-emits the cues it re-reads.
   this.onSubtitleTracks = opts.onSubtitleTracks || null;
   this.onCue = opts.onCue || null;
+  this.audioStrict = !!opts.audioStrict;
+  this.onAudioFallback = opts.onAudioFallback || null;
+  this.onAudioRefused = opts.onAudioRefused || null;
   this.subTracks_ = {};        // trackNumber -> {typeIndex, codecId}
   this.log = opts.log || function () {};
   this.startAt = opts.startAt || 0;
@@ -1037,8 +1040,18 @@ MkvEngine.prototype.openLanes_ = function () {
         return;
       }
       if (audio !== audioTracks[want]) {
-        this.log('mkvengine: audio #' + want + ' (' + this.trackCodec_(audioTracks[want]) +
+        var wantedCodec = this.trackCodec_(audioTracks[want]);
+        if (this.audioStrict) {
+          this.fatal_('this device cannot decode the audio (' + wantedCodec + ')',
+                      { track: 'audio', codecs: [wantedCodec] });
+          return;
+        }
+        this.log('mkvengine: audio #' + want + ' (' + wantedCodec +
                  ') undecodable here — using ' + this.trackCodec_(audio) + ' instead');
+        this.audioTypeIndex = audioTracks.indexOf(audio);
+        if (this.onAudioFallback) {
+          try { this.onAudioFallback(this.audioTypeIndex, want, wantedCodec); } catch (e) {}
+        }
       }
     }
     var chosen = [];
@@ -1315,11 +1328,13 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   // whole cast for choosing a Dolby track on a browser without the decoder.
   if (!codec) {
     this.log('mkvengine: cannot mux ' + newTrack.codecId + ' — keeping the current audio track');
+    this.refuseAudio_(typeIndex, newTrack.codecId);
     return;
   }
   var mime = muxer.contentType();
   if (!MediaSource.isTypeSupported(mime)) {
     this.log('mkvengine: cannot decode ' + codec + ' here — keeping the current audio track');
+    this.refuseAudio_(typeIndex, codec);
     return;
   }
   var oldMime = lane.muxer.contentType();
@@ -1344,6 +1359,12 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   this.audioTypeIndex = typeIndex || 0;
   this.log('mkvengine: audio -> track ' + newTrack.number + ' (' + mime + ')');
   this.repump_(this.getTime() || 0);
+};
+
+MkvEngine.prototype.refuseAudio_ = function (typeIndex, codec) {
+  if (this.onAudioRefused) {
+    try { this.onAudioRefused(typeIndex || 0, this.audioTypeIndex || 0, codec); } catch (e) {}
+  }
 };
 
 MkvEngine.prototype.pump_ = function (startOffset) {

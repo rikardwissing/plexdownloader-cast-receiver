@@ -138,8 +138,11 @@ function slog(msg) {
 }
 
 function reportLoadFailed(reason, detail) {
+  tellSenders(Object.assign({ type: 'loadFailed', reason: String(reason) }, detail || {}));
+}
+
+function tellSenders(message) {
   if (PREVIEW) return;
-  const message = Object.assign({ type: 'loadFailed', reason: String(reason) }, detail || {});
   try { context.sendCustomMessage(NS, undefined, message); } catch (e) {}
 }
 
@@ -527,7 +530,10 @@ window.tvHelpers = {
   // Survivable trouble. NOT Screens.error, which replaces playback with an error
   // card: the point is that the viewer keeps watching and can still pick a track
   // that works. It rides slog into the sender's diagnostics instead.
-  playbackNotice: (msg) => slog('notice: ' + msg),
+  playbackNotice: (msg) => {
+    slog('notice: ' + msg);
+    tellSenders({ type: 'notice', reason: String(msg || '') });
+  },
 };
 window.tvSetMediaElement({
   get currentTime() { return playerManager.getCurrentTimeSec() || 0; },
@@ -561,6 +567,10 @@ function reissue({ audioTypeIndex, withEngine = true }) {
   const request = new cast.framework.messages.LoadRequestData();
   request.media = media;
   request.currentTime = at;
+  try {
+    const activeText = playerManager.getTextTracksManager().getActiveIds();
+    if (activeText && activeText.length) request.activeTrackIds = activeText;
+  } catch (e) {}
   slog('reissue at ' + Math.round(at) + 's audio#' +
        (custom.audioTypeIndex || 0) + (withEngine ? '' : ' (no engine)'));
   reissuing = true;
@@ -680,7 +690,8 @@ if (!PREVIEW) {
     // tracks text=[] on every stream load), so the sender cannot activate it,
     // and CAF never self-activates text. Remember the wish; the LOAD_COMPLETE
     // handler flips it on through CAF's own TextTracksManager.
-    wantStreamSubtitle = isUniversal && custom.subtitleActive === true;
+    wantStreamSubtitle = custom.subtitleActive === true;
+    wantStreamSubtitleLanguage = typeof custom.subtitleLanguage === 'string' ? custom.subtitleLanguage : null;
     const dolbyStream = isUniversal && streamCodecs &&
       /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
     const container = (typeof custom.streamContainer === 'string')
@@ -769,6 +780,8 @@ if (!PREVIEW) {
       engine.onEngineFailed = (reason) => {
         slog('engine failed, falling back to default playback: ' + reason);
         teardownEngine();
+        tellSenders({ type: 'audioFallback', typeIndex: null, wanted: custom.audioTypeIndex || 0,
+                      reason: String(reason) });
         reissue({ withEngine: false });
       };
       media.contentUrl = engine.objectUrl;
@@ -788,6 +801,14 @@ if (!PREVIEW) {
         seekTo: (s) => { try { playerManager.seek(s); } catch (e) {} },
         log: slog,
         startAt: request.currentTime || 0,
+        audioStrict: custom.audioStrict === true,
+        onAudioFallback: (index, wanted, codec) => {
+          if (lastLoad && lastLoad.custom) lastLoad.custom.audioTypeIndex = index;
+          tellSenders({ type: 'audioFallback', typeIndex: index, wanted, codec });
+        },
+        onAudioRefused: (index, current, codec) => {
+          tellSenders({ type: 'audioRefused', typeIndex: index, current, codec });
+        },
         onSubtitleTracks: (list) => slog('mkv engine: ' + list.length + ' embedded text subtitle tracks'),
         onCue: (index, startMs, endMs, text) => Subs.engineCue(index, startMs, endMs, text),
       });
@@ -838,6 +859,7 @@ if (!PREVIEW) {
   // engine cast in the field). The LOAD interceptor is the teardown point.
 
   let wantStreamSubtitle = false;
+  let wantStreamSubtitleLanguage = null;
   playerManager.addEventListener(events.EventType.PLAYING, () => Queue.playing());
   playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE, () => {
     clearLoadWatch();
@@ -848,8 +870,11 @@ if (!PREVIEW) {
         const ttMgr = playerManager.getTextTracksManager();
         const tracks = ttMgr.getTracks() || [];
         if (tracks.length) {
-          ttMgr.setActiveByIds([tracks[0].trackId]);
-          slog('stream subtitle activated: track ' + tracks[0].trackId);
+          const want = (wantStreamSubtitleLanguage || '').toLowerCase().split('-')[0];
+          const speaks = (t) => want && String(t.language || '').toLowerCase().split('-')[0] === want;
+          const chosen = tracks.length > 1 ? (tracks.find(speaks) || tracks[0]) : tracks[0];
+          ttMgr.setActiveByIds([chosen.trackId]);
+          slog('stream subtitle activated: track ' + chosen.trackId + ' of ' + tracks.length);
         } else {
           slog('stream subtitle wanted but no text tracks visible');
         }
