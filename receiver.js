@@ -618,6 +618,8 @@ if (!PREVIEW) {
   // stream carrying AC-3, which no Cast receiver plays in HLS — just sits in
   // "loading" forever with no ERROR event. The budget is generous because a
   // still-converting server can honestly take a while to produce first bytes.
+  let steppingDown = null;
+  function clearSteppingDown() { if (steppingDown) { clearTimeout(steppingDown); steppingDown = null; } }
   let loadWatch = null;
   function clearLoadWatch() { if (loadWatch) { clearTimeout(loadWatch); loadWatch = null; } }
   function armLoadWatch() {
@@ -644,6 +646,7 @@ if (!PREVIEW) {
   // keeps default playback.
   playerManager.setMessageInterceptor(messages.MessageType.LOAD, (request) => {
     teardownEngine();
+    clearSteppingDown();
     const media = request.media || {};
     const custom = media.customData || {};
     const isReissue = reissuing;
@@ -651,10 +654,21 @@ if (!PREVIEW) {
     const videoHeight = Number(custom.videoHeight) || 0;
     const displayHeight = videoHeight > 0 ? maxDisplayHeight() : 0;
     if (videoHeight > displayHeight) {
-      slog('load refused: ' + videoHeight + 'p video, the display plays up to ' + displayHeight + 'p');
+      slog('load refused: ' + videoHeight + 'p video, the display plays up to ' + displayHeight + 'p' +
+           (custom.autoResolution === true ? ' - waiting for the sender to step down' : ''));
       clearLoadWatch();
       Subs.clear();
-      Screens.error("Can't play this video", 'This device plays video up to ' + displayHeight + 'p.');
+      const verdict = 'This device plays video up to ' + displayHeight + 'p.';
+      if (custom.autoResolution === true) {
+        const meta = media.metadata || {};
+        Screens.loading(meta.title || '', (meta.images && meta.images[0] && meta.images[0].url) || null);
+        steppingDown = setTimeout(() => {
+          steppingDown = null;
+          Screens.error("Can't play this video", verdict);
+        }, 20000);
+      } else {
+        Screens.error("Can't play this video", verdict);
+      }
       reportLoadFailed('display', { track: 'video', maxHeight: displayHeight });
       try { playerManager.stop(); } catch (e) {}
       return null;
@@ -885,7 +899,7 @@ if (!PREVIEW) {
     const reason = e && e.endedReason;
     if (reason === events.EndedReason.END_OF_STREAM && Queue.ended()) return;
     if (reason !== events.EndedReason.INTERRUPTED) Report.end();
-    Screens.show('idle');
+    if (!steppingDown) Screens.show('idle');
   });
   playerManager.addEventListener(events.EventType.ERROR, (e) => {
     clearLoadWatch();
