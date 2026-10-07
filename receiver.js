@@ -644,7 +644,7 @@ if (!PREVIEW) {
       slog('load refused: ' + videoHeight + 'p video, the display plays up to ' + displayHeight + 'p');
       clearLoadWatch();
       Subs.clear();
-      Screens.error("Can't play this video", 'This screen plays video up to ' + displayHeight + 'p.');
+      Screens.error("Can't play this video", 'This device plays video up to ' + displayHeight + 'p.');
       reportLoadFailed('display', { track: 'video', maxHeight: displayHeight });
       try { playerManager.stop(); } catch (e) {}
       return null;
