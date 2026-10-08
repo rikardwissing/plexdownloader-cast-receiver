@@ -26,6 +26,7 @@
   }
 
   const VIDEO_CODEC = /^(avc1|avc3|hvc1|hev1|vp9|av01)/i;
+  const declined = {};
   const DOLBY_CODEC = /^(ec-3|ac-3)/i;
 
   function codecList(mimeType) {
@@ -67,7 +68,11 @@
         // split; the isTypeSupported gate is what sent it here). contentType
         // is UNDEFINED in most call sites (measured — mse.js passes one arg),
         // so it cannot gate anything.
-        answer = codecs.length > 0 && (hasDolby || hasVideo);
+        answer = codecs.length > 0 && (hasDolby || (hasVideo && window.__dolbySplitActive === true));
+        if (hasVideo && !hasDolby && !window.__dolbySplitActive && !declined[mt]) {
+          declined[mt] = true;
+          log('fmp4split: declined ' + mt + ' outside a Dolby load');
+        }
       }
       return answer;
     }

@@ -137,6 +137,13 @@ function slog(msg) {
   catch (e) { /* no sender connected */ }
 }
 
+// Shaka caches isTypeSupported per type string, and a Dolby load answers "unsupported" for its lone video type.
+const DOLBY_FREE_VIDEO = { 'avc1.42E01E': 'avc1.640028', 'hvc1.1.6.L120.90': 'hvc1.1.6.L123.90' };
+function dolbyFreeCodecs(codecs) {
+  if (!codecs) return codecs;
+  return codecs.split(',').map((c) => DOLBY_FREE_VIDEO[c.trim()] || c.trim()).join(',');
+}
+
 function reportLoadFailed(reason, detail) {
   tellSenders(Object.assign({ type: 'loadFailed', reason: String(reason) }, detail || {}));
 }
@@ -633,6 +640,25 @@ if (!PREVIEW) {
   }
   let loadPlayer = 'native player';
   let statsLogged = false;
+  let lastDecoded = null;
+  let transferred = 0;
+  let transferSeen = false;
+  function playingElement() {
+    const host = document.querySelector('cast-media-player');
+    const candidates = [];
+    if (host && host.shadowRoot) candidates.push.apply(candidates, host.shadowRoot.querySelectorAll('video'));
+    candidates.push.apply(candidates, document.querySelectorAll('video'));
+    return candidates.find((v) => v.readyState >= 1 && v.videoWidth > 0) || null;
+  }
+  function countTransfers() {
+    if (!window.performance || typeof performance.getEntriesByType !== 'function') return;
+    const entries = performance.getEntriesByType('resource');
+    for (let i = 0; i < entries.length; i++) {
+      const size = entries[i].transferSize || entries[i].encodedBodySize || 0;
+      if (size > 0) { transferred += size; transferSeen = true; }
+    }
+    try { performance.clearResourceTimings(); } catch (e) {}
+  }
   function receiverVersion() {
     const script = document.querySelector('script[src*="receiver.js"]');
     const match = script && /[?&]v=([^&]+)/.exec(script.getAttribute('src'));
@@ -650,9 +676,13 @@ if (!PREVIEW) {
       if (caf.estimatedBandwidth > 0) stats.estimatedBandwidth = caf.estimatedBandwidth;
       if (caf.streamBandwidth > 0) stats.streamBandwidth = caf.streamBandwidth;
     }
-    const element = mediaElement();
+    stats.viewportWidth = Math.round(window.innerWidth || 0);
+    stats.viewportHeight = Math.round(window.innerHeight || 0);
+    stats.pixelRatio = window.devicePixelRatio || 1;
+    const element = playingElement();
     if (element) {
-      if (element.videoWidth) { stats.width = element.videoWidth; stats.height = element.videoHeight; }
+      stats.width = element.videoWidth;
+      stats.height = element.videoHeight;
       if (typeof element.getVideoPlaybackQuality === 'function') {
         const quality = element.getVideoPlaybackQuality();
         stats.droppedFrames = quality.droppedVideoFrames;
@@ -665,10 +695,24 @@ if (!PREVIEW) {
           break;
         }
       }
+      const video = element.webkitVideoDecodedByteCount;
+      const audio = element.webkitAudioDecodedByteCount;
+      if (typeof video === 'number') {
+        const sample = { bytes: video + (typeof audio === 'number' ? audio : 0), at: Date.now() };
+        if (lastDecoded && sample.at > lastDecoded.at && sample.bytes >= lastDecoded.bytes) {
+          stats.bitrate = (sample.bytes - lastDecoded.bytes) * 8000 / (sample.at - lastDecoded.at);
+        }
+        lastDecoded = sample;
+      }
     }
-    if (!statsLogged) {
+    countTransfers();
+    if (transferSeen) stats.bytesTransferred = transferred;
+    let state = '';
+    try { state = playerManager.getPlayerState(); } catch (e) {}
+    if (!statsLogged && state === messages.PlayerState.PLAYING) {
       statsLogged = true;
-      slog('stats: element=' + !!element + ' caf=' + (caf ? JSON.stringify(caf) : 'none'));
+      slog('stats: element=' + !!element + ' decoded=' + (lastDecoded ? lastDecoded.bytes : 'none') +
+           ' transfers=' + (transferSeen ? transferred : 'none') + ' caf=' + (caf ? JSON.stringify(caf) : 'none'));
     }
     return stats;
   }
@@ -762,6 +806,8 @@ if (!PREVIEW) {
     loadHeight = Number(custom.videoHeight) || 0;
     loadAuto = custom.autoResolution === true;
     loadAudioRetry = custom.audioRetry === true;
+    statsLogged = false;
+    lastDecoded = null;
     clearAudioCheck();
     loadAudioCodec = !custom.mseEngine && !custom.mkvEngine && typeof custom.audioCodec === 'string'
       ? custom.audioCodec : null;
@@ -833,7 +879,7 @@ if (!PREVIEW) {
       // Honest codecs only — the split is routed by the isTypeSupported gate
       // in index.html instead (the marker approach died in Shaka's codec
       // normalizer, measured: avc1.42E01E.pdl -> avc1.2a0NaN).
-      const codecsAttr = streamCodecs;
+      const codecsAttr = dolby ? streamCodecs : dolbyFreeCodecs(streamCodecs);
       window.__dolbySplitActive = !!dolby;
       // Plex writes NO token into playlist URIs, and relative resolution
       // drops the master's query — so the media playlist, the fMP4
@@ -865,11 +911,10 @@ if (!PREVIEW) {
       playbackConfig.segmentRequestHandler = (request2) => {
         request2.url = withToken(request2.url.replace('.ts.m4s', '.ts'));
       };
-      if (dolby) {
-        playbackConfig.shakaConfig = { mediaSource: { forceTransmux: true } };
-      } else if (!streamCodecs) {
-        playbackConfig.shakaConfig = { manifest: { hls: { disableCodecGuessing: true } } };
-      }
+      playbackConfig.shakaConfig = {
+        mediaSource: { forceTransmux: !!dolby },
+        manifest: { hls: { disableCodecGuessing: !streamCodecs } },
+      };
       slog('plex stream load: shaka' + (dolby ? ' + fmp4-split' : '') +
            (codecsAttr ? (', CODECS="' + codecsAttr + '"') : ', codecs from init'));
     }
