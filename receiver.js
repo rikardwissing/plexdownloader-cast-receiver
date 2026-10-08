@@ -761,6 +761,11 @@ if (!PREVIEW) {
     Subs.clear();
     awaitSenderRetry(verdict);
   }
+  function networkFailure(e) {
+    const err = (e && e.error) || {};
+    const shaka = err.shakaErrorCode || (err.category === 1 ? err.code : 0) || 0;
+    return shaka >= 1000 && shaka < 2000;
+  }
   function unsupportedContent(e) {
     const code = (e && e.detailedErrorCode) || 0;
     const err = (e && e.error) || {};
@@ -914,7 +919,12 @@ if (!PREVIEW) {
       playbackConfig.shakaConfig = {
         mediaSource: { forceTransmux: !!dolby },
         manifest: { hls: { disableCodecGuessing: !streamCodecs } },
+        streaming: {
+          ignoreTextStreamFailures: true,
+          retryParameters: { maxAttempts: 8, baseDelay: 1000, backoffFactor: 1.3, fuzzFactor: 0.5, timeout: 30000 },
+        },
       };
+      playbackConfig.segmentRequestRetryLimit = 8;
       slog('plex stream load: shaka' + (dolby ? ' + fmp4-split' : '') +
            (codecsAttr ? (', CODECS="' + codecsAttr + '"') : ', codecs from init'));
     }
@@ -1060,6 +1070,13 @@ if (!PREVIEW) {
          (e && e.error ? ' ' + JSON.stringify(e.error) : ''));
     if (unsupportedContent(e) && tooTallForDevice()) {
       refuseTooTall();
+      return;
+    }
+    if (networkFailure(e)) {
+      loadAudioRetry = false;
+      clearSteppingDown();
+      Screens.error("Can't play this video", 'The media server stopped sending the stream.');
+      reportLoadFailed('network', { track: 'stream' });
       return;
     }
     failOrAwaitAudioRetry(errorMessage(code));
