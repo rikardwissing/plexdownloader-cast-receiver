@@ -641,15 +641,11 @@ if (!PREVIEW) {
   let loadPlayer = 'native player';
   let statsLogged = false;
   let lastDecoded = null;
-  let transferred = 0;
-  let transferSeen = false;
   let segmentBytes = 0;
   let segmentBytesSeen = false;
   function downloadedBytes() {
     if (engine && typeof engine.bytesFetched === 'number') return engine.bytesFetched;
-    if (segmentBytesSeen) return segmentBytes;
-    countTransfers();
-    return transferSeen ? transferred : null;
+    return segmentBytesSeen ? segmentBytes : null;
   }
   function playingElement() {
     const host = document.querySelector('cast-media-player');
@@ -657,15 +653,6 @@ if (!PREVIEW) {
     if (host && host.shadowRoot) candidates.push.apply(candidates, host.shadowRoot.querySelectorAll('video'));
     candidates.push.apply(candidates, document.querySelectorAll('video'));
     return candidates.find((v) => v.readyState >= 1 && v.videoWidth > 0) || null;
-  }
-  function countTransfers() {
-    if (!window.performance || typeof performance.getEntriesByType !== 'function') return;
-    const entries = performance.getEntriesByType('resource');
-    for (let i = 0; i < entries.length; i++) {
-      const size = entries[i].transferSize || entries[i].encodedBodySize || 0;
-      if (size > 0) { transferred += size; transferSeen = true; }
-    }
-    try { performance.clearResourceTimings(); } catch (e) {}
   }
   function receiverVersion() {
     const script = document.querySelector('script[src*="receiver.js"]');
@@ -682,6 +669,9 @@ if (!PREVIEW) {
       if (typeof caf.droppedFrames === 'number') stats.droppedFrames = caf.droppedFrames;
       if (typeof caf.decodedFrames === 'number') stats.totalFrames = caf.decodedFrames;
       if (caf.estimatedBandwidth > 0) stats.estimatedBandwidth = caf.estimatedBandwidth;
+    }
+    if (engine && engine.throughputBps > 0) stats.estimatedBandwidth = engine.throughputBps;
+    if (caf) {
       if (caf.streamBandwidth > 0) stats.streamBandwidth = caf.streamBandwidth;
     }
     stats.viewportWidth = Math.round(window.innerWidth || 0);
