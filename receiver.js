@@ -730,7 +730,15 @@ if (!PREVIEW) {
   let loadTitle = '';
   let loadPoster = null;
   function tooTallForDevice() { return loadHeight > 0 && loadHeight > maxDisplayHeight(); }
+  function audioLikelyUnplayable() {
+    if (!loadAudioRetry || !loadAudioCodec) return false;
+    return !canDisplay('audio/mp4', loadAudioCodec) && !mseSupport('audio/mp4; codecs="' + loadAudioCodec + '"');
+  }
+  let displayReported = false;
+  let errorHandled = false;
   function refuseTooTall() {
+    if (displayReported) return;
+    displayReported = true;
     const maxHeight = maxDisplayHeight();
     const verdict = 'This device plays video up to ' + maxHeight + 'p.';
     slog('the device refused ' + loadHeight + 'p video, it plays up to ' + maxHeight + 'p' +
@@ -782,7 +790,7 @@ if (!PREVIEW) {
       if (state === messages.PlayerState.PLAYING ||
           state === messages.PlayerState.PAUSED) return;
       slog('load watchdog: still ' + state + ' after 45s - giving up');
-      if (tooTallForDevice()) {
+      if (tooTallForDevice() && !audioLikelyUnplayable()) {
         refuseTooTall();
         try { playerManager.stop(); } catch (e) {}
         return;
@@ -810,6 +818,8 @@ if (!PREVIEW) {
     loadHeight = Number(custom.videoHeight) || 0;
     loadAuto = custom.autoResolution === true;
     loadAudioRetry = custom.audioRetry === true;
+    displayReported = false;
+    errorHandled = false;
     statsLogged = false;
     lastDecoded = null;
     segmentBytes = 0;
@@ -1091,7 +1101,9 @@ if (!PREVIEW) {
     const code = (e && e.detailedErrorCode) || 0;
     slog('player error: detailedErrorCode=' + code +
          (e && e.error ? ' ' + JSON.stringify(e.error) : ''));
-    if (unsupportedContent(e) && tooTallForDevice()) {
+    if (errorHandled) return;
+    errorHandled = true;
+    if (unsupportedContent(e) && tooTallForDevice() && !audioLikelyUnplayable()) {
       refuseTooTall();
       return;
     }
