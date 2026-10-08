@@ -620,6 +620,36 @@ if (!PREVIEW) {
   // still-converting server can honestly take a while to produce first bytes.
   let steppingDown = null;
   function clearSteppingDown() { if (steppingDown) { clearTimeout(steppingDown); steppingDown = null; } }
+  let loadHeight = 0;
+  let loadAuto = false;
+  let loadTitle = '';
+  let loadPoster = null;
+  function tooTallForDevice() { return loadHeight > 0 && loadHeight > maxDisplayHeight(); }
+  function refuseTooTall() {
+    const maxHeight = maxDisplayHeight();
+    const verdict = 'This device plays video up to ' + maxHeight + 'p.';
+    slog('the device refused ' + loadHeight + 'p video, it plays up to ' + maxHeight + 'p' +
+         (loadAuto ? ' - waiting for the sender to step down' : ''));
+    clearLoadWatch();
+    clearSteppingDown();
+    Subs.clear();
+    if (loadAuto) {
+      Screens.loading(loadTitle, loadPoster);
+      steppingDown = setTimeout(() => {
+        steppingDown = null;
+        Screens.error("Can't play this video", verdict);
+      }, 20000);
+    } else {
+      Screens.error("Can't play this video", verdict);
+    }
+    reportLoadFailed('display', { track: 'video', maxHeight });
+  }
+  function unsupportedContent(e) {
+    const code = (e && e.detailedErrorCode) || 0;
+    const err = (e && e.error) || {};
+    const shaka = err.shakaErrorCode || (err.category === 4 ? err.code : 0);
+    return shaka === 4032 || code === 102 || code === 104 || code === 110;
+  }
   let loadWatch = null;
   function clearLoadWatch() { if (loadWatch) { clearTimeout(loadWatch); loadWatch = null; } }
   function armLoadWatch() {
@@ -631,6 +661,11 @@ if (!PREVIEW) {
       if (state === messages.PlayerState.PLAYING ||
           state === messages.PlayerState.PAUSED) return;
       slog('load watchdog: still ' + state + ' after 45s - giving up');
+      if (tooTallForDevice()) {
+        refuseTooTall();
+        try { playerManager.stop(); } catch (e) {}
+        return;
+      }
       reportLoadFailed('the stream never started (still ' + state + ' after 45s)', { track: 'stream' });
       Screens.error("Can't play this video",
         'The stream never started. Its audio or video is likely a format ' +
@@ -651,28 +686,11 @@ if (!PREVIEW) {
     const custom = media.customData || {};
     const isReissue = reissuing;
     reissuing = false;
-    const videoHeight = Number(custom.videoHeight) || 0;
-    const displayHeight = videoHeight > 0 ? maxDisplayHeight() : 0;
-    if (videoHeight > displayHeight) {
-      slog('load refused: ' + videoHeight + 'p video, the display plays up to ' + displayHeight + 'p' +
-           (custom.autoResolution === true ? ' - waiting for the sender to step down' : ''));
-      clearLoadWatch();
-      Subs.clear();
-      const verdict = 'This device plays video up to ' + displayHeight + 'p.';
-      if (custom.autoResolution === true) {
-        const meta = media.metadata || {};
-        Screens.loading(meta.title || '', (meta.images && meta.images[0] && meta.images[0].url) || null);
-        steppingDown = setTimeout(() => {
-          steppingDown = null;
-          Screens.error("Can't play this video", verdict);
-        }, 20000);
-      } else {
-        Screens.error("Can't play this video", verdict);
-      }
-      reportLoadFailed('display', { track: 'video', maxHeight: displayHeight });
-      try { playerManager.stop(); } catch (e) {}
-      return null;
-    }
+    loadHeight = Number(custom.videoHeight) || 0;
+    loadAuto = custom.autoResolution === true;
+    loadTitle = (media.metadata && media.metadata.title) || '';
+    loadPoster = (media.metadata && media.metadata.images && media.metadata.images[0] &&
+                  media.metadata.images[0].url) || null;
     const ownAdvance = !!custom.queueKey && custom.queueKey === Queue.advancing;
     const sameItem = !!custom.report && !!Report.info && custom.report.key === Report.info.key;
     if (!ownAdvance && !sameItem && !isReissue) Queue.clear();
@@ -906,6 +924,10 @@ if (!PREVIEW) {
     const code = (e && e.detailedErrorCode) || 0;
     slog('player error: detailedErrorCode=' + code +
          (e && e.error ? ' ' + JSON.stringify(e.error) : ''));
+    if (unsupportedContent(e) && tooTallForDevice()) {
+      refuseTooTall();
+      return;
+    }
     Screens.error("Can't play this video", errorMessage(code));
   });
 
