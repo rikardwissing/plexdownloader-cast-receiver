@@ -823,6 +823,7 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.lanes = {};              // trackNumber -> {muxer,timeline,sb,queue,pending,pendingMs,initSent}
   this.onEngineFailed = null;
   this.appendedMs = 0;          // furthest pts appended THIS run (repump re-anchors)
+  this.bytesFetched = 0;
   this.pumpStartMs = -1e9;      // where the CURRENT run began (media ms)
   this.lastFetchDoneAt = Date.now();
   this.stallTimer = setInterval(function () { self.stallCheck_(); }, 2000);
@@ -926,6 +927,7 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
         if (timer) clearTimeout(timer);
         self.inflightAbort = null;
         self.lastFetchDoneAt = Date.now();
+        self.bytesFetched += buf && buf.byteLength ? buf.byteLength : 0;
         var took = Date.now() - t0;
         if (took > 5000) self.log('mkvengine: slow fetch @' + start + ' took ' + took + 'ms');
         return buf;

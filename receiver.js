@@ -643,6 +643,14 @@ if (!PREVIEW) {
   let lastDecoded = null;
   let transferred = 0;
   let transferSeen = false;
+  let segmentBytes = 0;
+  let segmentBytesSeen = false;
+  function downloadedBytes() {
+    if (engine && typeof engine.bytesFetched === 'number') return engine.bytesFetched;
+    if (segmentBytesSeen) return segmentBytes;
+    countTransfers();
+    return transferSeen ? transferred : null;
+  }
   function playingElement() {
     const host = document.querySelector('cast-media-player');
     const candidates = [];
@@ -705,14 +713,15 @@ if (!PREVIEW) {
         lastDecoded = sample;
       }
     }
-    countTransfers();
-    if (transferSeen) stats.bytesTransferred = transferred;
+    const downloaded = downloadedBytes();
+    if (downloaded !== null) stats.bytesTransferred = downloaded;
     let state = '';
     try { state = playerManager.getPlayerState(); } catch (e) {}
     if (!statsLogged && state === messages.PlayerState.PLAYING) {
       statsLogged = true;
       slog('stats: element=' + !!element + ' decoded=' + (lastDecoded ? lastDecoded.bytes : 'none') +
-           ' transfers=' + (transferSeen ? transferred : 'none') + ' caf=' + (caf ? JSON.stringify(caf) : 'none'));
+           ' downloaded=' + downloaded + ' (engine=' + !!engine + ' segments=' + segmentBytesSeen +
+           ') caf=' + (caf ? JSON.stringify(caf) : 'none'));
     }
     return stats;
   }
@@ -813,6 +822,8 @@ if (!PREVIEW) {
     loadAudioRetry = custom.audioRetry === true;
     statsLogged = false;
     lastDecoded = null;
+    segmentBytes = 0;
+    segmentBytesSeen = false;
     clearAudioCheck();
     loadAudioCodec = !custom.mseEngine && !custom.mkvEngine && typeof custom.audioCodec === 'string'
       ? custom.audioCodec : null;
@@ -915,6 +926,10 @@ if (!PREVIEW) {
       };
       playbackConfig.segmentRequestHandler = (request2) => {
         request2.url = withToken(request2.url.replace('.ts.m4s', '.ts'));
+      };
+      playbackConfig.segmentHandler = (data) => {
+        if (data && data.byteLength) { segmentBytes += data.byteLength; segmentBytesSeen = true; }
+        return data;
       };
       playbackConfig.shakaConfig = {
         mediaSource: { forceTransmux: !!dolby },
