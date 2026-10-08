@@ -1048,6 +1048,24 @@ if (!PREVIEW) {
 
   let wantStreamSubtitle = false;
   let wantStreamSubtitleLanguage = null;
+  let health = null;
+  setInterval(() => {
+    let state = '';
+    try { state = playerManager.getPlayerState(); } catch (e) {}
+    if (state !== messages.PlayerState.PLAYING && state !== messages.PlayerState.BUFFERING) { health = null; return; }
+    const stats = playbackStats();
+    const now = { at: Date.now(), bytes: stats.bytesTransferred };
+    let rate = '?';
+    if (health && typeof now.bytes === 'number' && typeof health.bytes === 'number' && now.bytes >= health.bytes) {
+      rate = ((now.bytes - health.bytes) / 1048576 / ((now.at - health.at) / 1000)).toFixed(2) + ' MB/s';
+    }
+    health = now;
+    slog('health: ' + state + ' ' + loadPlayer + ' buffer=' +
+         (typeof stats.bufferAhead === 'number' ? stats.bufferAhead.toFixed(1) + 's' : '?') +
+         ' download=' + rate + ' bitrate=' +
+         (typeof stats.bitrate === 'number' ? (stats.bitrate / 1e6).toFixed(1) + 'Mbps' : '?') +
+         ' dropped=' + (stats.droppedFrames != null ? stats.droppedFrames : '?'));
+  }, 15000);
   playerManager.addEventListener(events.EventType.PLAYING, () => {
     Queue.playing();
     if (loadAudioCodec && !audioCheck) audioCheck = setTimeout(checkAudioPlays, 4000);

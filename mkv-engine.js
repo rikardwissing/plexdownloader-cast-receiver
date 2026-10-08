@@ -1458,6 +1458,8 @@ MkvEngine.prototype.pump_ = function (startOffset) {
       self.sleep_(1000).then(step);
       return;
     }
+    var fetchStarted = Date.now();
+    var mediaBefore = self.appendedMs;
     self.fetchRange_(offset, offset + WINDOW - 1, gen).then(function (buf) {
       if (gen !== self.generation || self.dead) return;
       var bytes = new Uint8Array(buf);
@@ -1473,6 +1475,12 @@ MkvEngine.prototype.pump_ = function (startOffset) {
         consumed = self.demux.parseClusters(chunk, base, onBlock);
       } catch (e) { self.fatal_('demux@' + base + ': ' + e); return; }
       if (bytes.length < WINDOW) sawEnd = true;
+      var tookMs = Date.now() - fetchStarted;
+      var carriedMs = self.appendedMs - mediaBefore;
+      if (carriedMs > 0 && tookMs > carriedMs) {
+        self.log('mkvengine: behind, ' + (bytes.length / 1048576).toFixed(1) + ' MB took ' + tookMs +
+                 'ms for ' + carriedMs + 'ms of media');
+      }
       if (consumed === 0 && sawEnd) { finish(); return; }
       if (consumed === 0 && chunk.length > 32 * 1024 * 1024) {
         self.fatal_('cluster larger than 32MB'); return;
