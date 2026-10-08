@@ -146,7 +146,7 @@ function tellSenders(message) {
   try { context.sendCustomMessage(NS, undefined, message); } catch (e) {}
 }
 
-const CODEC_NAMES = { 'ec-3': 'Dolby Digital Plus', 'ac-3': 'Dolby Digital', 'A_DTS': 'DTS',
+const CODEC_NAMES = { 'ec-3': 'Dolby Digital Plus', 'ac-3': 'Dolby Digital', 'A_DTS': 'DTS', 'dtsc': 'DTS', 'mlpa': 'Dolby TrueHD',
                       'A_TRUEHD': 'Dolby TrueHD', 'A_EAC3': 'Dolby Digital Plus', 'A_AC3': 'Dolby Digital' };
 function codecLabel(codec) {
   const c = String(codec || '');
@@ -622,6 +622,30 @@ if (!PREVIEW) {
   function clearSteppingDown() { if (steppingDown) { clearTimeout(steppingDown); steppingDown = null; } }
   let loadHeight = 0;
   let loadAuto = false;
+  let loadAudioCodec = null;
+  let audioCheck = null;
+  function clearAudioCheck() { if (audioCheck) { clearTimeout(audioCheck); audioCheck = null; } }
+  function mediaElement() {
+    const host = document.querySelector('cast-media-player');
+    const inShadow = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    return inShadow || document.querySelector('video');
+  }
+  function checkAudioPlays() {
+    audioCheck = null;
+    const codec = loadAudioCodec;
+    if (!codec) return;
+    const element = mediaElement();
+    const decoded = element && typeof element.webkitAudioDecodedByteCount === 'number'
+      ? element.webkitAudioDecodedByteCount : null;
+    const deviceDecodes = canDisplay('audio/mp4', codec);
+    slog('audio check: ' + codec + ' device=' + deviceDecodes + ' decodedBytes=' + decoded);
+    if (deviceDecodes || (decoded !== null && decoded > 0)) return;
+    clearLoadWatch();
+    Subs.clear();
+    Screens.error("Can't play this video", 'This device can\'t play ' + codecLabel(codec) + ' audio.');
+    reportLoadFailed('audio', { track: 'audio', codecs: [codec] });
+    try { playerManager.stop(); } catch (e) {}
+  }
   let loadTitle = '';
   let loadPoster = null;
   function tooTallForDevice() { return loadHeight > 0 && loadHeight > maxDisplayHeight(); }
@@ -688,6 +712,9 @@ if (!PREVIEW) {
     reissuing = false;
     loadHeight = Number(custom.videoHeight) || 0;
     loadAuto = custom.autoResolution === true;
+    clearAudioCheck();
+    loadAudioCodec = !custom.mseEngine && !custom.mkvEngine && typeof custom.audioCodec === 'string'
+      ? custom.audioCodec : null;
     loadTitle = (media.metadata && media.metadata.title) || '';
     loadPoster = (media.metadata && media.metadata.images && media.metadata.images[0] &&
                   media.metadata.images[0].url) || null;
@@ -870,6 +897,8 @@ if (!PREVIEW) {
   // demux-error-on-immediate-recast pattern). Release at the moment playback
   // actually ends.
   playerManager.setMessageInterceptor(messages.MessageType.STOP, (request) => {
+    clearAudioCheck();
+    loadAudioCodec = null;
     UpNext.hide();
     Queue.clear();
     Report.end();
@@ -892,7 +921,10 @@ if (!PREVIEW) {
 
   let wantStreamSubtitle = false;
   let wantStreamSubtitleLanguage = null;
-  playerManager.addEventListener(events.EventType.PLAYING, () => Queue.playing());
+  playerManager.addEventListener(events.EventType.PLAYING, () => {
+    Queue.playing();
+    if (loadAudioCodec && !audioCheck) audioCheck = setTimeout(checkAudioPlays, 4000);
+  });
   playerManager.addEventListener(events.EventType.PLAYER_LOAD_COMPLETE, () => {
     clearLoadWatch();
     Screens.show('playback');
