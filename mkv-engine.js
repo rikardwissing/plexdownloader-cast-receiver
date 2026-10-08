@@ -1450,7 +1450,8 @@ MkvEngine.prototype.pump_ = function (startOffset) {
   function step() {
     if (self.dead || gen !== self.generation) return;
     // Backpressure: a minute of media ahead of the playhead is plenty.
-    var nowMs = (self.getTime() || 0) * 1000;
+    // The playhead reads 0 until the element has metadata, which a Dolby lane only gets after its first flush.
+    var nowMs = Math.max((self.getTime() || 0) * 1000, self.pumpStartMs);
     if (self.appendedMs - nowMs > 60000) {
       self.sleep_(1000).then(step);
       return;
