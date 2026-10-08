@@ -622,6 +622,7 @@ if (!PREVIEW) {
   function clearSteppingDown() { if (steppingDown) { clearTimeout(steppingDown); steppingDown = null; } }
   let loadHeight = 0;
   let loadAuto = false;
+  let loadAudioRetry = false;
   let loadAudioCodec = null;
   let audioCheck = null;
   function clearAudioCheck() { if (audioCheck) { clearTimeout(audioCheck); audioCheck = null; } }
@@ -653,16 +654,27 @@ if (!PREVIEW) {
     clearLoadWatch();
     clearSteppingDown();
     Subs.clear();
-    if (loadAuto) {
-      Screens.loading(loadTitle, loadPoster);
-      steppingDown = setTimeout(() => {
-        steppingDown = null;
-        Screens.error("Can't play this video", verdict);
-      }, 20000);
-    } else {
-      Screens.error("Can't play this video", verdict);
-    }
+    if (loadAuto) awaitSenderRetry(verdict);
+    else Screens.error("Can't play this video", verdict);
     reportLoadFailed('display', { track: 'video', maxHeight });
+  }
+  function awaitSenderRetry(verdict) {
+    clearSteppingDown();
+    Screens.loading(loadTitle, loadPoster);
+    steppingDown = setTimeout(() => {
+      steppingDown = null;
+      Screens.error("Can't play this video", verdict);
+    }, 20000);
+  }
+  function failOrAwaitAudioRetry(verdict) {
+    if (!loadAudioRetry) {
+      Screens.error("Can't play this video", verdict);
+      return;
+    }
+    loadAudioRetry = false;
+    slog('the stream failed - waiting for the sender to retry with AAC audio');
+    Subs.clear();
+    awaitSenderRetry(verdict);
   }
   function unsupportedContent(e) {
     const code = (e && e.detailedErrorCode) || 0;
@@ -687,7 +699,7 @@ if (!PREVIEW) {
         return;
       }
       reportLoadFailed('the stream never started (still ' + state + ' after 45s)', { track: 'stream' });
-      Screens.error("Can't play this video",
+      failOrAwaitAudioRetry(
         'The stream never started. Its audio or video is likely a format ' +
         'this TV can\'t play in a stream - Dolby audio only plays from a ' +
         'direct file.');
@@ -708,6 +720,7 @@ if (!PREVIEW) {
     reissuing = false;
     loadHeight = Number(custom.videoHeight) || 0;
     loadAuto = custom.autoResolution === true;
+    loadAudioRetry = custom.audioRetry === true;
     clearAudioCheck();
     loadAudioCodec = !custom.mseEngine && !custom.mkvEngine && typeof custom.audioCodec === 'string'
       ? custom.audioCodec : null;
@@ -959,7 +972,7 @@ if (!PREVIEW) {
       refuseTooTall();
       return;
     }
-    Screens.error("Can't play this video", errorMessage(code));
+    failOrAwaitAudioRetry(errorMessage(code));
   });
 
   context.addCustomMessageListener(NS, (event) => {
