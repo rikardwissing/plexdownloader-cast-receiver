@@ -811,6 +811,7 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.audioStrict = !!opts.audioStrict;
   this.onAudioFallback = opts.onAudioFallback || null;
   this.onAudioRefused = opts.onAudioRefused || null;
+  this.onAudioUnplayable = opts.onAudioUnplayable || null;
   this.subTracks_ = {};        // trackNumber -> {typeIndex, codecId}
   this.log = opts.log || function () {};
   this.startAt = opts.startAt || 0;
@@ -1035,22 +1036,31 @@ MkvEngine.prototype.openLanes_ = function () {
           var c = this.trackCodec_(audioTracks[i]);
           if (codecs.indexOf(c) < 0) codecs.push(c);
         }
-        this.fatal_('this device cannot decode the audio (' + codecs.join(', ') + ')',
-                    { track: 'audio', codecs: codecs });
-        return;
-      }
-      if (audio !== audioTracks[want]) {
-        var wantedCodec = this.trackCodec_(audioTracks[want]);
-        if (this.audioStrict) {
-          this.fatal_('this device cannot decode the audio (' + wantedCodec + ')',
-                      { track: 'audio', codecs: [wantedCodec] });
+        if (!this.onAudioUnplayable) {
+          this.fatal_('this device cannot decode the audio (' + codecs.join(', ') + ')',
+                      { track: 'audio', codecs: codecs });
           return;
         }
-        this.log('mkvengine: audio #' + want + ' (' + wantedCodec +
-                 ') undecodable here — using ' + this.trackCodec_(audio) + ' instead');
-        this.audioTypeIndex = audioTracks.indexOf(audio);
-        if (this.onAudioFallback) {
-          try { this.onAudioFallback(this.audioTypeIndex, want, wantedCodec); } catch (e) {}
+        this.log('mkvengine: no decodable audio (' + codecs.join(', ') + ') — playing without sound');
+        try { this.onAudioUnplayable([this.trackCodec_(audioTracks[want])], want); } catch (e) {}
+      } else if (audio !== audioTracks[want]) {
+        var wantedCodec = this.trackCodec_(audioTracks[want]);
+        if (this.audioStrict) {
+          if (!this.onAudioUnplayable) {
+            this.fatal_('this device cannot decode the audio (' + wantedCodec + ')',
+                        { track: 'audio', codecs: [wantedCodec] });
+            return;
+          }
+          this.log('mkvengine: audio #' + want + ' (' + wantedCodec + ') undecodable here — playing without sound');
+          audio = null;
+          try { this.onAudioUnplayable([wantedCodec], want); } catch (e) {}
+        } else {
+          this.log('mkvengine: audio #' + want + ' (' + wantedCodec +
+                   ') undecodable here — using ' + this.trackCodec_(audio) + ' instead');
+          this.audioTypeIndex = audioTracks.indexOf(audio);
+          if (this.onAudioFallback) {
+            try { this.onAudioFallback(this.audioTypeIndex, want, wantedCodec); } catch (e) {}
+          }
         }
       }
     }
@@ -1306,7 +1316,7 @@ MkvEngine.prototype.repump_ = function (seconds) {
 // over itself, which MSE replaces without a visible seam; the audio gap is
 // the refill time — sub-second on a LAN.
 MkvEngine.prototype.setAudioTrack = function (typeIndex) {
-  if (this.dead) return;
+  if (this.dead) return true;
   var audioSeen = 0, newTrack = null;
   for (var i = 0; i < this.demux.tracks.length; i++) {
     var t = this.demux.tracks[i];
@@ -1314,13 +1324,13 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
     if (audioSeen === (typeIndex || 0)) { newTrack = t; break; }
     audioSeen++;
   }
-  if (!newTrack) { this.log('mkvengine: no audio track #' + typeIndex); return; }
+  if (!newTrack) { this.log('mkvengine: no audio track #' + typeIndex); return true; }
   var oldNum = null, lane = null;
   for (var k in this.lanes) {
     if (this.lanes[k].track.type === 2) { oldNum = k; lane = this.lanes[k]; break; }
   }
-  if (!lane) return;
-  if (String(newTrack.number) === String(oldNum)) return;
+  if (!lane) return false;
+  if (String(newTrack.number) === String(oldNum)) return true;
   var timescale = Math.round(newTrack.audio.sampleRate);
   var muxer = new Fmp4Muxer(newTrack, timescale);
   var codec = muxer.codecString();
@@ -1329,13 +1339,13 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   if (!codec) {
     this.log('mkvengine: cannot mux ' + newTrack.codecId + ' — keeping the current audio track');
     this.refuseAudio_(typeIndex, newTrack.codecId);
-    return;
+    return true;
   }
   var mime = muxer.contentType();
   if (!MediaSource.isTypeSupported(mime)) {
     this.log('mkvengine: cannot decode ' + codec + ' here — keeping the current audio track');
     this.refuseAudio_(typeIndex, codec);
-    return;
+    return true;
   }
   var oldMime = lane.muxer.contentType();
   try {
@@ -1345,7 +1355,7 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
     // now, not a read-ahead minute from now.
     var now = this.getTime() || 0;
     lane.sb.remove(Math.max(0, now - 0.25), Infinity);
-  } catch (e) { this.fatal_('audio switch: ' + e); return; }
+  } catch (e) { this.fatal_('audio switch: ' + e); return true; }
   delete this.lanes[oldNum];
   lane.track = newTrack;
   lane.muxer = muxer;
@@ -1359,6 +1369,7 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   this.audioTypeIndex = typeIndex || 0;
   this.log('mkvengine: audio -> track ' + newTrack.number + ' (' + mime + ')');
   this.repump_(this.getTime() || 0);
+  return true;
 };
 
 MkvEngine.prototype.refuseAudio_ = function (typeIndex, codec) {

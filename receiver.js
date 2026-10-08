@@ -640,11 +640,7 @@ if (!PREVIEW) {
     const deviceDecodes = canDisplay('audio/mp4', codec);
     slog('audio check: ' + codec + ' device=' + deviceDecodes + ' decodedBytes=' + decoded);
     if (deviceDecodes || (decoded !== null && decoded > 0)) return;
-    clearLoadWatch();
-    Subs.clear();
-    Screens.error("Can't play this video", 'This device can\'t play ' + codecLabel(codec) + ' audio.');
-    reportLoadFailed('audio', { track: 'audio', codecs: [codec] });
-    try { playerManager.stop(); } catch (e) {}
+    tellSenders({ type: 'audioUnplayable', codec });
   }
   let loadTitle = '';
   let loadPoster = null;
@@ -868,6 +864,9 @@ if (!PREVIEW) {
         onAudioRefused: (index, current, codec) => {
           tellSenders({ type: 'audioRefused', typeIndex: index, current, codec });
         },
+        onAudioUnplayable: (codecs, wanted) => {
+          tellSenders({ type: 'audioUnplayable', codec: codecs[0], typeIndex: wanted });
+        },
         onSubtitleTracks: (list) => slog('mkv engine: ' + list.length + ' embedded text subtitle tracks'),
         onCue: (index, startMs, endMs, text) => Subs.engineCue(index, startMs, endMs, text),
       });
@@ -985,7 +984,9 @@ if (!PREVIEW) {
       Subs.select(typeof msg.typeIndex === 'number' ? msg.typeIndex : -1);
     } else if (msg.type === 'setAudioTrack' && engine) {
       if (typeof engine.setAudioTrack === 'function') {
-        engine.setAudioTrack(msg.audioTypeIndex || 0);
+        if (engine.setAudioTrack(msg.audioTypeIndex || 0) === false && lastLoad) {
+          reissue({ audioTypeIndex: msg.audioTypeIndex || 0 });
+        }
       } else if (lastLoad) {
         // The MkvEngine switches audio the reissue way: reload the same media
         // at the live position with the new track in customData - the LOAD
