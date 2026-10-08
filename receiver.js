@@ -631,6 +631,47 @@ if (!PREVIEW) {
     const inShadow = host && host.shadowRoot && host.shadowRoot.querySelector('video');
     return inShadow || document.querySelector('video');
   }
+  let loadPlayer = 'native player';
+  let statsLogged = false;
+  function receiverVersion() {
+    const script = document.querySelector('script[src*="receiver.js"]');
+    const match = script && /[?&]v=([^&]+)/.exec(script.getAttribute('src'));
+    return match ? match[1] : null;
+  }
+  function playbackStats() {
+    const stats = { type: 'stats', engine: loadPlayer, version: receiverVersion(),
+                    maxDisplayHeight: maxDisplayHeight(), hevc: canDisplay('video/mp4', 'hvc1.2.4.L120.90') };
+    let caf = null;
+    try { caf = typeof playerManager.getStats === 'function' ? playerManager.getStats() : null; } catch (e) {}
+    if (caf) {
+      if (caf.width) { stats.width = caf.width; stats.height = caf.height; }
+      if (typeof caf.droppedFrames === 'number') stats.droppedFrames = caf.droppedFrames;
+      if (typeof caf.decodedFrames === 'number') stats.totalFrames = caf.decodedFrames;
+      if (caf.estimatedBandwidth > 0) stats.estimatedBandwidth = caf.estimatedBandwidth;
+      if (caf.streamBandwidth > 0) stats.streamBandwidth = caf.streamBandwidth;
+    }
+    const element = mediaElement();
+    if (element) {
+      if (element.videoWidth) { stats.width = element.videoWidth; stats.height = element.videoHeight; }
+      if (typeof element.getVideoPlaybackQuality === 'function') {
+        const quality = element.getVideoPlaybackQuality();
+        stats.droppedFrames = quality.droppedVideoFrames;
+        stats.totalFrames = quality.totalVideoFrames;
+      }
+      const now = element.currentTime;
+      for (let i = 0; i < element.buffered.length; i++) {
+        if (element.buffered.start(i) <= now + 0.5 && element.buffered.end(i) >= now) {
+          stats.bufferAhead = element.buffered.end(i) - now;
+          break;
+        }
+      }
+    }
+    if (!statsLogged) {
+      statsLogged = true;
+      slog('stats: element=' + !!element + ' caf=' + (caf ? JSON.stringify(caf) : 'none'));
+    }
+    return stats;
+  }
   function checkAudioPlays() {
     audioCheck = null;
     const codec = loadAudioCodec;
@@ -833,6 +874,8 @@ if (!PREVIEW) {
            (codecsAttr ? (', CODECS="' + codecsAttr + '"') : ', codecs from init'));
     }
     playerManager.setPlaybackConfig(playbackConfig);
+    loadPlayer = isUniversal ? (window.__dolbySplitActive ? 'Shaka, Dolby split' : 'Shaka')
+      : (/\.m3u8($|\?)/i.test(url) ? 'Shaka' : 'native player');
     const meta = media.metadata || {};
     const poster = (meta.images && meta.images[0] && meta.images[0].url) || null;
     Screens.loading(meta.title || '', poster);
@@ -844,6 +887,7 @@ if (!PREVIEW) {
       // null fetcher = plain HTTP Range, which is what this receiver has always
       // used; the WebRTC receiver injects a data-channel source instead.
       engine = new window.MseEngine(url, custom.audioTypeIndex || 0, null);
+      loadPlayer = 'MSE engine';
       engine.onAudioSwitch = (index) => reissue({ audioTypeIndex: index });
       engine.onEngineFailed = (reason) => {
         slog('engine failed, falling back to default playback: ' + reason);
@@ -864,6 +908,7 @@ if (!PREVIEW) {
       // natively. Seeks ride the SEEK interceptor into engine.reposition.
       const mkvUrl = media.contentUrl || media.contentId;
       lastLoad = { url: mkvUrl, media: Object.assign({}, media), custom };
+      loadPlayer = 'MKV engine';
       engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
         getTime: () => playerManager.getCurrentTimeSec() || 0,
         seekTo: (s) => { try { playerManager.seek(s); } catch (e) {} },
@@ -980,6 +1025,8 @@ if (!PREVIEW) {
     if (msg.type === 'ping') {
       context.sendCustomMessage(NS, event.senderId,
                                 { type: 'pong', capabilities: capabilities() });
+    } else if (msg.type === 'stats') {
+      context.sendCustomMessage(NS, event.senderId, playbackStats());
     } else if (msg.type === 'upNext') {
       if (Queue.active) return;
       if (msg.hide) UpNext.hide(); else UpNext.show(msg);
