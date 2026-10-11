@@ -829,6 +829,7 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.lastFetchDoneAt = Date.now();
   this.stallTimer = setInterval(function () { self.stallCheck_(); }, 2000);
   this.evictCountdown = 0;
+  this.aheadCapMs = 60000;
   this.mediaSource.addEventListener('sourceopen', function onOpen() {
     self.mediaSource.removeEventListener('sourceopen', onOpen);
     self.start_();
@@ -1043,24 +1044,18 @@ MkvEngine.prototype.openLanes_ = function () {
           var c = this.trackCodec_(audioTracks[i]);
           if (codecs.indexOf(c) < 0) codecs.push(c);
         }
-        if (!this.onAudioUnplayable) {
-          this.fatal_('this device cannot decode the audio (' + codecs.join(', ') + ')',
-                      { track: 'audio', codecs: codecs });
-          return;
-        }
         this.log('mkvengine: no decodable audio (' + codecs.join(', ') + ') — playing without sound');
-        try { this.onAudioUnplayable([this.trackCodec_(audioTracks[want])], want); } catch (e) {}
+        if (this.onAudioUnplayable) {
+          try { this.onAudioUnplayable([this.trackCodec_(audioTracks[want])], want); } catch (e) {}
+        }
       } else if (audio !== audioTracks[want]) {
         var wantedCodec = this.trackCodec_(audioTracks[want]);
         if (this.audioStrict) {
-          if (!this.onAudioUnplayable) {
-            this.fatal_('this device cannot decode the audio (' + wantedCodec + ')',
-                        { track: 'audio', codecs: [wantedCodec] });
-            return;
-          }
           this.log('mkvengine: audio #' + want + ' (' + wantedCodec + ') undecodable here — playing without sound');
           audio = null;
-          try { this.onAudioUnplayable([wantedCodec], want); } catch (e) {}
+          if (this.onAudioUnplayable) {
+            try { this.onAudioUnplayable([wantedCodec], want); } catch (e) {}
+          }
         } else {
           this.log('mkvengine: audio #' + want + ' (' + wantedCodec +
                    ') undecodable here — using ' + this.trackCodec_(audio) + ' instead');
@@ -1152,13 +1147,28 @@ MkvEngine.prototype.offsetForMs_ = function (ms) {
 MkvEngine.prototype.drain_ = function (lane) {
   if (this.dead || !lane.sb || lane.sb.updating || !lane.queue.length) return;
   if (this.mediaSource.readyState !== 'open') return;
+  if (lane.quotaRetryAt && Date.now() < lane.quotaRetryAt) return;
+  var fragment = lane.queue.shift();
   try {
-    lane.sb.appendBuffer(lane.queue.shift());
+    lane.sb.appendBuffer(fragment);
   } catch (e) {
     if (e && e.name === 'QuotaExceededError') {
-      lane.queue.unshift(lane.queue.shift());
+      lane.queue.unshift(fragment);
       var now = this.getTime() || 0;
-      try { lane.sb.remove(0, Math.max(0.1, now - 30)); } catch (e2) {}
+      var bufferedAhead = 0;
+      try {
+        var held = lane.sb.buffered;
+        if (held.length) bufferedAhead = Math.max(0, held.end(held.length - 1) - now);
+      } catch (e4) {}
+      var cap = Math.max(8000, bufferedAhead * 900);
+      if (cap < this.aheadCapMs) {
+        this.aheadCapMs = cap;
+        this.log('mkvengine: buffer full — reading ' + Math.round(cap / 1000) + 's ahead');
+      }
+      lane.quotaRetryAt = Date.now() + 1000;
+      var self = this;
+      setTimeout(function () { self.drain_(lane); }, 1000);
+      try { lane.sb.remove(0, Math.max(0.1, now - 10)); } catch (e2) {}
       // A backward seek leaves the OLD run's far-ahead buffer in place;
       // quota relief must clear that too, or once nothing is left behind
       // the playhead this retry loop spins without ever freeing a byte.
@@ -1459,7 +1469,7 @@ MkvEngine.prototype.pump_ = function (startOffset) {
     // Backpressure: a minute of media ahead of the playhead is plenty.
     // The playhead reads 0 until the element has metadata, which a Dolby lane only gets after its first flush.
     var nowMs = Math.max((self.getTime() || 0) * 1000, self.pumpStartMs);
-    if (self.appendedMs - nowMs > 60000) {
+    if (self.appendedMs - nowMs > self.aheadCapMs) {
       self.sleep_(1000).then(step);
       return;
     }
