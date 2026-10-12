@@ -126,6 +126,7 @@ function MkvDemuxer() {
   this.tracks = [];                // {number,type,codecId,codecPrivate,defaultDurationNs,video{},audio{},language}
   this.segmentStart = 0;           // file offset of the Segment payload
   this.cuesOffset = null;          // file offset of the Cues element (from SeekHead)
+  this.seekHeadOffsets = [];
   this.cues = [];                  // {timeMs, clusterOffset(file abs)}
   this.firstClusterOffset = null;
 }
@@ -192,7 +193,24 @@ MkvDemuxer.prototype.parseSeekHead_ = function (r) {
       else seek.pos += ssize.value;
     }
     if (target === MKV_ID.Cues && position != null) this.cuesOffset = this.segmentStart + position;
+    if (target === MKV_ID.SeekHead && position != null) this.seekHeadOffsets.push(this.segmentStart + position);
   }
+};
+
+MkvDemuxer.prototype.elementLength = function (u8) {
+  var r = new MkvByteReader(u8, 0);
+  var id = r.readVint(true);
+  var size = id ? r.readVint(false) : null;
+  return size ? r.pos + size.value : 0;
+};
+
+MkvDemuxer.prototype.parseSeekHeadAt = function (u8) {
+  var r = new MkvByteReader(u8, 0);
+  var id = r.readVint(true);
+  var size = id ? r.readVint(false) : null;
+  if (!size || id.value !== MKV_ID.SeekHead || r.remaining() < size.value) return false;
+  this.parseSeekHead_(new MkvByteReader(r.readBytes(size.value), 0));
+  return true;
 };
 
 MkvDemuxer.prototype.parseTracks_ = function (r) {
@@ -977,23 +995,56 @@ MkvEngine.prototype.start_ = function () {
       return growHeader(window_ * 2);
     });
   }
-  // Cues are an optimization (cue-less files repump from the first cluster),
-  // so a failed fetch or parse is survivable, never fatal.
-  function fetchCues() {
-    if (self.demux.cuesOffset == null || self.demux.cues.length) return Promise.resolve();
-    return self.fetchRange_(self.demux.cuesOffset,
-                            self.demux.cuesOffset + 512 * 1024 - 1, null)
-      .then(function (buf) {
-        try { self.demux.parseCues(new Uint8Array(buf)); } catch (e) {}
-      }, function () {});
-  }
   growHeader(256 * 1024).then(function (parsed) {
     if (!parsed || self.dead) return;
-    return fetchCues().then(function () {
+    return self.locateCues_().then(function () {
       if (self.dead) return;
       self.openLanes_();
     });
   }).then(null, function (e) { self.fatal_('start: ' + e); });
+};
+
+// Cues are an optimization (cue-less files repump from the first cluster),
+// so a failed fetch or parse is survivable, never fatal.
+MkvEngine.prototype.locateCues_ = function () {
+  var self = this;
+  var demux = this.demux;
+  var visited = {};
+  var hops = 0;
+  // Recorders write the Cues last and reach them through a SeekHead at the end of the file, sometimes several deep.
+  function followSeekHeads() {
+    if (demux.cuesOffset != null || hops >= 6) return Promise.resolve();
+    var next = null;
+    for (var i = 0; i < demux.seekHeadOffsets.length; i++) {
+      if (!visited[demux.seekHeadOffsets[i]]) { next = demux.seekHeadOffsets[i]; break; }
+    }
+    if (next == null) return Promise.resolve();
+    visited[next] = true;
+    hops++;
+    return self.fetchRange_(next, next + 64 * 1024 - 1, null).then(function (buf) {
+      try { demux.parseSeekHeadAt(new Uint8Array(buf)); } catch (e) {}
+      return followSeekHeads();
+    }, function () {});
+  }
+  function parseCues(buf) {
+    try { demux.parseCues(new Uint8Array(buf)); } catch (e) {}
+  }
+  function fetchCues() {
+    if (demux.cuesOffset == null || demux.cues.length) return Promise.resolve();
+    var start = demux.cuesOffset;
+    return self.fetchRange_(start, start + 512 * 1024 - 1, null).then(function (buf) {
+      var need = demux.elementLength(new Uint8Array(buf));
+      if (need > buf.byteLength && need <= 16 * 1024 * 1024) {
+        return self.fetchRange_(start, start + need - 1, null).then(parseCues);
+      }
+      parseCues(buf);
+    }).then(null, function () {});
+  }
+  return followSeekHeads().then(fetchCues).then(function () {
+    self.log('mkvengine: ' + (demux.cues.length
+      ? demux.cues.length + ' cue points' + (hops ? ' via ' + hops + ' chained SeekHead(s)' : '')
+      : 'no cues — a seek reads on from the first cluster'));
+  });
 };
 
 // The synchronous back half of start_: pick tracks, open a SourceBuffer lane
