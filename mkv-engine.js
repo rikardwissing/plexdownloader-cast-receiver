@@ -489,9 +489,14 @@ function Fmp4Muxer(track, timescale) {
   this.seq = 0;
 }
 
+Fmp4Muxer.packagedCodecs = {
+  'V_MPEG4/ISO/AVC': 'h264', 'V_MPEGH/ISO/HEVC': 'hevc', A_AAC: 'aac', A_AC3: 'ac3', A_EAC3: 'eac3',
+};
+
 Fmp4Muxer.prototype.codecString = function () {
   var cp = this.track.codecPrivate;
   var id = this.track.codecId;
+  if (!Fmp4Muxer.packagedCodecs[id]) return null;
   if (id === 'V_MPEG4/ISO/AVC' && cp && cp.length >= 4) {
     var hex = function (b) { return (b < 16 ? '0' : '') + b.toString(16).toUpperCase(); };
     return 'avc1.' + hex(cp[1]) + hex(cp[2]) + hex(cp[3]);

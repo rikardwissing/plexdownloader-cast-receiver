@@ -86,7 +86,13 @@ let sbMuxedEC3 = 'pending';
 })();
 
 function capabilities() {
-  return {
+  const packaged = {};
+  if (typeof Fmp4Muxer !== 'undefined') {
+    Object.keys(Fmp4Muxer.packagedCodecs).forEach((id) => {
+      packaged['mkv' + Fmp4Muxer.packagedCodecs[id].toUpperCase()] = true;
+    });
+  }
+  return Object.assign(packaged, {
     mse: !!window.MediaSource,
     mp4box: typeof MP4Box !== 'undefined',
     videoH264: mseSupport('video/mp4; codecs="avc1.640028"'),
@@ -130,7 +136,7 @@ function capabilities() {
     // it rides the pong into the sender's diagnostics log either way.
     audioTracks: !!document.createElement('video').audioTracks,
     userAgent: navigator.userAgent,
-  };
+  });
 }
 
 // Receiver-side logging lands in the sender's diagnostics file (CASTLOG
