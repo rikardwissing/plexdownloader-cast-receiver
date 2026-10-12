@@ -112,9 +112,7 @@
               const t = info.tracks[i];
               const isVideo = !!t.video;
               const keep = (contentType === 'video') === isVideo;
-              // Segment BOTH tracks so mp4box releases every sample (only
-              // segmenting one leaks the other's samples); discard the
-              // unwanted output in onSegment.
+              // Segment both tracks: only a segmented track's samples get released in onSegment.
               box.setSegmentOptions(t.id, { keep: keep }, { nbSamples: 50 });
             }
             const inits = box.initializeSegmentation();
@@ -129,8 +127,9 @@
           } catch (e) { reject(e); }
         };
       });
-      box.onSegment = function (id, user, buffer) {
+      box.onSegment = function (id, user, buffer, sampleNum) {
         if (user && user.keep) self.pending_.push(new Uint8Array(buffer));
+        box.releaseUsedSamples(id, sampleNum);
       };
       const init = this.initBytes_.slice(0);
       init.fileStart = 0;
