@@ -1380,8 +1380,15 @@ MkvEngine.prototype.offsetForMs_ = function (ms) {
 };
 
 MkvEngine.prototype.drain_ = function (lane) {
-  if (this.dead || !lane.sb || lane.sb.updating || !lane.queue.length) return;
-  if (this.mediaSource.readyState !== 'open') return;
+  if (this.dead || !lane.sb || lane.sb.updating) return;
+  // An append or remove reopens an 'ended' source, which a seek back after the pump reached the end needs.
+  if (this.mediaSource.readyState === 'closed') return;
+  // One SourceBuffer operation at a time: remove() throws while another is running, and updateend brings us back here.
+  while (lane.evictions && lane.evictions.length) {
+    var stale = lane.evictions.shift();
+    try { lane.sb.remove(stale[0], stale[1]); return; } catch (e5) {}
+  }
+  if (!lane.queue.length) return;
   if (lane.quotaRetryAt && Date.now() < lane.quotaRetryAt) return;
   var fragment = lane.queue.shift();
   try {
@@ -1390,6 +1397,11 @@ MkvEngine.prototype.drain_ = function (lane) {
     if (e && e.name === 'QuotaExceededError') {
       lane.queue.unshift(fragment);
       var now = this.getTime() || 0;
+      lane.evictions = this.staleRanges_(lane, now);
+      if (lane.evictions.length) {
+        this.drain_(lane);
+        return;
+      }
       var bufferedAhead = 0;
       try {
         var held = lane.sb.buffered;
@@ -1403,15 +1415,22 @@ MkvEngine.prototype.drain_ = function (lane) {
       lane.quotaRetryAt = Date.now() + 1000;
       var self = this;
       setTimeout(function () { self.drain_(lane); }, 1000);
-      try { lane.sb.remove(0, Math.max(0.1, now - 10)); } catch (e2) {}
-      // A backward seek leaves the OLD run's far-ahead buffer in place;
-      // quota relief must clear that too, or once nothing is left behind
-      // the playhead this retry loop spins without ever freeing a byte.
-      try { lane.sb.remove(now + 90, Infinity); } catch (e3) {}
       return;
     }
     this.fatal_('append: ' + e);
   }
+};
+
+// Removing the start of a GOP takes the rest of it too, so nothing within 10 s behind the playhead is stale.
+MkvEngine.prototype.staleRanges_ = function (lane, now) {
+  var out = [];
+  try {
+    var b = lane.sb.buffered;
+    if (!b.length) return out;
+    if (b.start(0) < now - 11) out.push([b.start(0), now - 10]);
+    if (b.end(b.length - 1) > now + 91) out.push([now + 90, b.end(b.length - 1)]);
+  } catch (e) {}
+  return out;
 };
 
 MkvEngine.prototype.flushLane_ = function (lane) {
@@ -1544,6 +1563,7 @@ MkvEngine.prototype.repump_ = function (seconds) {
     lane.queue = [];
     lane.pending = [];
     lane.pendingSinceMs = null;
+    lane.evictions = [];
     lane.timeline.reset();
     // Re-open with an init segment: a repump is a DISCONTINUITY. Desktop
     // Chrome takes a mid-stream jump in stride, but the TV's pipeline can
