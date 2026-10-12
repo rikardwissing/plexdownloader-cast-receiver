@@ -713,6 +713,12 @@ if (!PREVIEW) {
            ' downloaded=' + downloaded + ' (engine=' + !!engine + ' segments=' + segmentBytesSeen +
            ') caf=' + (caf ? JSON.stringify(caf) : 'none'));
     }
+    const memory = window.performance && performance.memory;
+    if (memory && memory.usedJSHeapSize > 0) {
+      stats.jsHeapUsed = memory.usedJSHeapSize;
+      stats.jsHeapLimit = memory.jsHeapSizeLimit;
+    }
+    if (navigator.deviceMemory) stats.deviceMemory = navigator.deviceMemory;
     return stats;
   }
   function checkAudioPlays() {
