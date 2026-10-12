@@ -336,6 +336,45 @@ MkvDemuxer.prototype.parseClusters = function (u8, base, onSample) {
   return consumed;
 };
 
+MkvDemuxer.prototype.clusterHeadAt_ = function (u8, at, base, totalBytes) {
+  var r = new MkvByteReader(u8, base);
+  r.pos = at;
+  var id = r.readVint(true);
+  if (!id || id.value !== MKV_ID.Cluster) return null;
+  var size = r.readVint(false);
+  if (!size || size.unknown || size.value < 3 || size.value > 64 * 1024 * 1024) return null;
+  var end = r.fileOffset() + size.value;
+  if (totalBytes && end > totalBytes) return null;
+  // ffmpeg opens every cluster with a CRC-32 element, so the Timestamp may come second.
+  for (var n = 0; n < 3; n++) {
+    var cid = r.readVint(true);
+    var csize = cid ? r.readVint(false) : null;
+    if (!csize || csize.unknown || r.remaining() < csize.value) return null;
+    if (cid.value === MKV_ID.Timestamp) {
+      if (csize.value < 1 || csize.value > 8) return null;
+      return { offset: base + at, end: end,
+               timeMs: r.readUint(csize.value) * this.timestampScale / 1e6 };
+    }
+    if ((cid.value !== 0xBF && cid.value !== 0xEC) || csize.value > 64) return null;
+    r.pos += csize.value;
+  }
+  return null;
+};
+
+MkvDemuxer.prototype.findClusters = function (u8, base, totalBytes) {
+  var found = [];
+  for (var i = 0; i + 4 <= u8.length; i++) {
+    if (u8[i] !== 0x1F || u8[i + 1] !== 0x43 || u8[i + 2] !== 0xB6 || u8[i + 3] !== 0x75) continue;
+    var c = this.clusterHeadAt_(u8, i, base, totalBytes);
+    while (c) {
+      found.push(c);
+      c = c.end - base < u8.length ? this.clusterHeadAt_(u8, c.end - base, base, totalBytes) : null;
+    }
+    if (found.length) break;
+  }
+  return found;
+};
+
 MkvDemuxer.prototype.parseClusterBody_ = function (r, onSample) {
   var clusterTicks = 0;
   while (r.remaining() > 1) {
@@ -766,18 +805,30 @@ MkvTrackTimeline.prototype.convert = function (raw) {
 // the MseEngine so receivers wire it identically: objectUrl to hand the
 // element/CAF, reposition() for seeks, destroy(), onEngineFailed(reason).
 
+function mkvRangeTotal(text) {
+  var m = /bytes[^\/\r\n]*\/(\d+)/i.exec(text || '');
+  return m ? parseInt(m[1], 10) : null;
+}
+
 function MkvEngine(url, audioTypeIndex, opts) {
   opts = opts || {};
   var self = this;
   this.url = url;
   this.audioTypeIndex = audioTypeIndex || 0;
+  this.totalBytes = opts.totalBytes || null;
+  this.customFetcher_ = !!opts.fetcher;
+  this.sizeProbe_ = null;
+  this.landKeyMs_ = null;
   this.fetcher = opts.fetcher || function (start, end, signal) {
     if (typeof fetch === 'function') {
       return fetch(url, { headers: { Range: 'bytes=' + start + '-' + end },
                           signal: signal })
         .then(function (r) {
           if (r.status !== 206 && r.status !== 200) throw new Error('HTTP ' + r.status);
+          var total = mkvRangeTotal(r.headers.get('Content-Range'));
           return r.arrayBuffer().then(function (buf) {
+            if (r.status === 200) total = buf.byteLength;
+            if (total) self.totalBytes = total;
             // A 200 is the WHOLE file from a server that ignored the Range
             // header. Slice it to the window asked for, or the pump labels
             // bytes with offsets they don't have and demuxes garbage.
@@ -802,6 +853,9 @@ function MkvEngine(url, audioTypeIndex, opts) {
           return;
         }
         var buf = xhr.response;
+        var total = xhr.status === 200 && buf ? buf.byteLength
+          : mkvRangeTotal(xhr.getAllResponseHeaders());
+        if (total) self.totalBytes = total;
         if (xhr.status === 200 && buf && buf.byteLength > end - start + 1) {
           buf = buf.slice(start, end + 1);
         }
@@ -944,6 +998,10 @@ MkvEngine.prototype.fetchRange_ = function (start, end, gen) {
     var t0 = Date.now();
     return Promise.resolve(self.fetcher(start, end, ctrl ? ctrl.signal : undefined))
       .then(function (buf) {
+        if (buf && !(buf instanceof ArrayBuffer) && !ArrayBuffer.isView(buf) && buf.buffer) {
+          if (buf.total > 0) self.totalBytes = buf.total;
+          buf = buf.buffer;
+        }
         if (timer) clearTimeout(timer);
         self.inflightAbort = null;
         self.lastFetchDoneAt = Date.now();
@@ -1004,7 +1062,7 @@ MkvEngine.prototype.start_ = function () {
   }).then(null, function (e) { self.fatal_('start: ' + e); });
 };
 
-// Cues are an optimization (cue-less files repump from the first cluster),
+// Cues are an optimization (cue-less files estimate seeks by byte position),
 // so a failed fetch or parse is survivable, never fatal.
 MkvEngine.prototype.locateCues_ = function () {
   var self = this;
@@ -1043,7 +1101,133 @@ MkvEngine.prototype.locateCues_ = function () {
   return followSeekHeads().then(fetchCues).then(function () {
     self.log('mkvengine: ' + (demux.cues.length
       ? demux.cues.length + ' cue points' + (hops ? ' via ' + hops + ' chained SeekHead(s)' : '')
-      : 'no cues — a seek reads on from the first cluster'));
+      : 'no cues — seeks estimate a byte offset and resync on a cluster'));
+  });
+};
+
+// Content-Length is CORS-safelisted where Content-Range is not, and bytes=0- is how every <video> element opens a file.
+MkvEngine.prototype.fileSize_ = function () {
+  var self = this;
+  if (this.totalBytes || this.customFetcher_ || typeof XMLHttpRequest === 'undefined') {
+    return Promise.resolve(this.totalBytes);
+  }
+  if (this.sizeProbe_) return this.sizeProbe_;
+  this.sizeProbe_ = new Promise(function (resolve) {
+    var xhr = new XMLHttpRequest();
+    var settled = false;
+    function settle(total) {
+      if (settled) return;
+      settled = true;
+      try { xhr.abort(); } catch (e) {}
+      resolve(total);
+    }
+    xhr.open('GET', self.url, true);
+    xhr.setRequestHeader('Range', 'bytes=0-');
+    xhr.timeout = self.fetchTimeoutMs;
+    xhr.onreadystatechange = function () {
+      if (settled || xhr.readyState < 2) return;
+      if (xhr.status !== 200 && xhr.status !== 206) { settle(null); return; }
+      var headers = xhr.getAllResponseHeaders() || '';
+      var length = /content-length:\s*(\d+)/i.exec(headers);
+      settle(mkvRangeTotal(headers) || (length ? parseInt(length[1], 10) : null));
+    };
+    xhr.onerror = function () { settle(null); };
+    xhr.ontimeout = function () { settle(null); };
+    xhr.send();
+  }).then(function (total) {
+    if (total && !self.totalBytes) self.totalBytes = total;
+    return self.totalBytes;
+  });
+  return this.sizeProbe_;
+};
+
+MkvEngine.prototype.scanClusters_ = function (at, firstWindow, gen) {
+  var self = this;
+  var limit = Math.min(this.totalBytes || Infinity, at + 16 * 1024 * 1024);
+  function read(start, size) {
+    var end = Math.min(start + size, limit) - 1;
+    if (end < start) return Promise.resolve([]);
+    return self.fetchRange_(start, end, gen).then(function (buf) {
+      var u8 = new Uint8Array(buf);
+      var found = self.demux.findClusters(u8, start, self.totalBytes);
+      if (found.length || u8.length < end - start + 1 || end + 1 >= limit) return found;
+      return read(start + u8.length - 64, Math.min(Math.max(size * 2, 256 * 1024), 4 * 1024 * 1024));
+    });
+  }
+  return read(at, firstWindow);
+};
+
+MkvEngine.prototype.estimateOffset_ = function (ms, gen) {
+  var self = this;
+  var demux = this.demux;
+  var lo = { offset: demux.firstClusterOffset, timeMs: 0, end: null };
+  var probes = 0;
+  return this.fileSize_().then(function (total) {
+    var durationMs = demux.durationMs();
+    if (!total || !durationMs) {
+      self.log('mkvengine: no cues and ' + (total ? 'no duration' : 'no file size') +
+               ' — reading on from the first cluster');
+      return lo.offset;
+    }
+    var hi = { offset: total, timeMs: Math.max(durationMs, ms + 1), first: null };
+    var seen = [];
+    function probe() {
+      if (self.dead || gen !== self.generation) return lo.offset;
+      if (ms - lo.timeMs <= 5000 || probes >= 12) return lo.offset;
+      if (hi.first != null && lo.end === hi.first) return lo.offset;
+      var from = lo.end || lo.offset + 1;
+      var span = hi.offset - from;
+      if (span <= 0) return lo.offset;
+      var aim = Math.max(lo.timeMs, ms - 2500);
+      var a = seen[seen.length - 2], b = seen[seen.length - 1];
+      var at;
+      if (a && b.timeMs !== a.timeMs) {
+        at = b.offset + (aim - b.timeMs) * (b.offset - a.offset) / (b.timeMs - a.timeMs);
+      } else {
+        at = lo.offset + (hi.timeMs > lo.timeMs ? (aim - lo.timeMs) / (hi.timeMs - lo.timeMs) : 0.5) *
+             (hi.offset - lo.offset);
+      }
+      at = Math.max(from, Math.min(Math.floor(at), hi.offset - Math.floor(span / 8)));
+      if (at >= hi.offset) return lo.offset;
+      probes++;
+      var clusterBytes = lo.end ? lo.end - lo.offset : 0;
+      var firstWindow = at === lo.end ? 4096
+        : Math.min(4 * 1024 * 1024, Math.max(256 * 1024, Math.ceil(clusterBytes / 2)));
+      return self.scanClusters_(at, firstWindow, gen).then(function (found) {
+        if (found.length) seen.push(found[0]);
+        var i = 0;
+        while (i < found.length && found[i].timeMs <= ms) lo = found[i++];
+        if (!found.length) hi = { offset: at, timeMs: hi.timeMs, first: hi.first };
+        else if (i === 0) hi = { offset: at, timeMs: found[0].timeMs, first: found[0].offset };
+        else if (i < found.length) hi = { offset: found[i].offset, timeMs: found[i].timeMs, first: found[i].offset };
+        return probe();
+      });
+    }
+    return Promise.resolve(probe()).then(function (offset) {
+      self.log('mkvengine: no cues — ' + probes + ' probe(s) put ' + (ms / 1000).toFixed(1) +
+               's in the cluster from ' + (lo.timeMs / 1000).toFixed(1) + 's');
+      return offset;
+    }, function (e) {
+      if (self.dead || gen !== self.generation) throw e;
+      self.log('mkvengine: seek estimate failed (' + e + ') — reading on from ' + (lo.timeMs / 1000).toFixed(1) + 's');
+      return lo.offset;
+    });
+  });
+};
+
+MkvEngine.prototype.pumpFrom_ = function (ms) {
+  var self = this;
+  var gen = this.generation;
+  if (this.demux.cues.length || ms <= 5000) {
+    this.pump_(this.offsetForMs_(ms), null);
+    return;
+  }
+  this.estimateOffset_(ms, gen).then(function (offset) {
+    if (self.dead || gen !== self.generation) return;
+    self.pump_(offset, offset === self.demux.firstClusterOffset ? null : ms);
+  }).then(null, function (e) {
+    if (self.dead || gen !== self.generation) return;
+    self.fatal_('seek: ' + e);
   });
 };
 
@@ -1182,7 +1366,7 @@ MkvEngine.prototype.openLanes_ = function () {
     }
     var at = Math.max(this.getTime() * 1000 || 0, this.startAt * 1000);
     this.pumpStartMs = at;
-    this.pump_(this.offsetForMs_(at));
+    this.pumpFrom_(at);
   } catch (e) { this.fatal_('start: ' + e); }
 };
 
@@ -1284,8 +1468,10 @@ MkvEngine.prototype.stallCheck_ = function () {
   // repump (a repump refetches the same cue and rebuilds the same island).
   if (this.seekTo) {
     var hop = this.bufferedStartAfter_(t);
-    if (hop != null && hop - t < 2 && this.isBuffered_(hop + 0.05)) {
+    var landing = hop != null && this.landKeyMs_ != null && Math.abs(hop * 1000 - this.landKeyMs_) < 1000;
+    if (hop != null && (hop - t < 2 || landing) && this.isBuffered_(hop + 0.05)) {
       this.log('mkvengine: gap hop ' + t.toFixed(2) + 's -> ' + hop.toFixed(2) + 's');
+      this.landKeyMs_ = null;
       try { this.seekTo(hop + 0.05); } catch (e) {}
       return;
     }
@@ -1374,7 +1560,8 @@ MkvEngine.prototype.repump_ = function (seconds) {
   // without fetching a byte (the 2026-08-24 backward-seek stall).
   this.appendedMs = ms;
   this.pumpStartMs = ms;
-  this.pump_(this.offsetForMs_(ms));
+  this.landKeyMs_ = null;
+  this.pumpFrom_(ms);
 };
 
 // Switch the audio track IN PLACE — no reload. The demuxer already parses
@@ -1446,9 +1633,10 @@ MkvEngine.prototype.refuseAudio_ = function (typeIndex, codec) {
   }
 };
 
-MkvEngine.prototype.pump_ = function (startOffset) {
+MkvEngine.prototype.pump_ = function (startOffset, landMs) {
   var gen = ++this.generation;
   var offset = startOffset;
+  var awaitKey = landMs != null;
   var carry = null;               // partial trailing cluster from last window
   var carryBase = 0;
   var WINDOW = 2 * 1024 * 1024;
@@ -1473,6 +1661,11 @@ MkvEngine.prototype.pump_ = function (startOffset) {
     var lane = self.lanes[trackNum];
     if (!lane) return;
     var isVideo = lane.track.type === 1;
+    if (isVideo && awaitKey) {
+      if (!raw.keyframe) return;
+      awaitKey = false;
+      if (raw.ptsMs > landMs + 500) self.landKeyMs_ = raw.ptsMs;
+    }
     // VIDEO fragments BEGIN ON KEYFRAMES — one fragment per GOP. This is
     // load-bearing, not cosmetic: WebKit's decoder dies (MEDIA_ERR_DECODE)
     // crossing an append seam that lands mid-GOP during live delivery —
