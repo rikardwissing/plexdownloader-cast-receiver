@@ -991,7 +991,12 @@ if (!PREVIEW) {
       loadPlayer = 'MKV engine';
       engine = new MkvEngine(mkvUrl, custom.audioTypeIndex || 0, {
         getTime: () => playerManager.getCurrentTimeSec() || 0,
-        seekTo: (s) => { try { playerManager.seek(s); } catch (e) {} },
+        // CAF ignores a seek within 1 s of the playhead, and gap hops are usually smaller.
+        seekTo: (s) => {
+          const el = mediaElement();
+          if (el && Math.abs(el.currentTime - s) < 1) { try { el.currentTime = s; } catch (e) {} return; }
+          try { playerManager.seek(s); } catch (e) {}
+        },
         log: slog,
         startAt: request.currentTime || 0,
         audioStrict: custom.audioStrict === true,
