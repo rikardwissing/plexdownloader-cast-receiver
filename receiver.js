@@ -631,6 +631,22 @@ if (!PREVIEW) {
   playerManager.addEventListener(events.EventType.PLAYING, () => {
     loadEyes.active = false;
   });
+  [events.EventType.REQUEST_PAUSE, events.EventType.REQUEST_PLAY, events.EventType.REQUEST_STOP,
+   events.EventType.PAUSE, events.EventType.MEDIA_FINISHED].filter(Boolean).forEach((type) => {
+    playerManager.addEventListener(type, (e) => {
+      if (loadEyes.active) return;
+      slog('life: ' + type + (e && e.endedReason ? ' ended=' + e.endedReason : ''));
+    });
+  });
+  const systemEvents = cast.framework.system.EventType;
+  try {
+    context.addEventListener(systemEvents.STANDBY_CHANGED, (e) => slog('life: standby ' + (e && e.isStandby)));
+    context.addEventListener(systemEvents.VISIBILITY_CHANGED, (e) => slog('life: visible ' + (e && e.isVisible)));
+    context.addEventListener(systemEvents.SENDER_DISCONNECTED, (e) => slog('life: sender gone ' + (e && e.reason)));
+    context.addEventListener(systemEvents.SHUTDOWN, () => slog('life: shutdown'));
+  } catch (e) { slog('life: system events unavailable ' + e); }
+  document.addEventListener('visibilitychange', () => slog('life: page ' + document.visibilityState));
+  window.addEventListener('keydown', (e) => slog('life: key ' + (e.key || '?') + ' ' + (e.keyCode || 0)), true);
 
   // A load that never finishes gets a verdict, not an eternal spinner. CAF
   // errors loudly on a package it can't play (Shaka gates the manifest), but a
