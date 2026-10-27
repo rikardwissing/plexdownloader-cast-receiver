@@ -148,6 +148,8 @@ function capabilities() {
     canDisplayDTS: canDisplay('audio/mp4', 'dtsc'),
     canDisplayHEVC: canDisplay('video/mp4', 'hvc1.2.4.L120.90'),
     videoDolbyVision: canDisplaySize(['dvhe.05.06'], 3840, 2160),
+    containerTSH264: canDisplay('video/mp2t', 'avc1.640028'),
+    containerTSHEVC: canDisplay('video/mp2t', 'hvc1.1.6.L120.90'),
     display720: canDisplayHeight(720),
     display1080: canDisplayHeight(1080),
     display2160: canDisplayHeight(2160),
