@@ -85,6 +85,23 @@ let sbMuxedEC3 = 'pending';
   } catch (e) { sbMuxedEC3 = 'setup failed: ' + e; }
 })();
 
+// MediaCapabilities has explicit colour-transfer questions; an absent API or
+// unanswered probe never approves copying HDR. Refreshes in subsequent pongs.
+const pictureHDR = {};
+if (navigator.mediaCapabilities && navigator.mediaCapabilities.decodingInfo) {
+  ['pq', 'hlg'].forEach((transfer) => DISPLAY_SIZES.forEach((size) => {
+    const config = { type: 'media-source', video: {
+      contentType: 'video/mp4; codecs="hvc1.2.4.L120.90"',
+      width: size.width, height: size.height, bitrate: 20000000, framerate: 30,
+      colorGamut: 'rec2020', transferFunction: transfer,
+      hdrMetadataType: transfer === 'pq' ? 'smpteSt2086' : undefined,
+    } };
+    navigator.mediaCapabilities.decodingInfo(config).then((answer) => {
+      pictureHDR['pictureHEVC10HDR' + transfer.toUpperCase() + size.height] = answer.supported === true;
+    }).catch(() => {});
+  }));
+}
+
 function capabilities() {
   const packaged = {};
   if (typeof Fmp4Muxer !== 'undefined') {
@@ -92,7 +109,27 @@ function capabilities() {
       packaged['mkv' + Fmp4Muxer.packagedCodecs[id].toUpperCase()] = true;
     });
   }
-  return Object.assign(packaged, {
+  // Exact picture size/depth answers for new senders. Older senders ignore these.
+  const pictureCodecs = {
+    H264: 'avc1.640028', H26410: 'avc1.6e0028',
+    HEVC8: 'hvc1.1.6.L120.90', HEVC10: 'hvc1.2.4.L120.90',
+    AV1: 'av01.0.08M.08', VP9: 'vp09.00.40.08',
+  };
+  Object.keys(pictureCodecs).forEach((name) => {
+    const codec = pictureCodecs[name];
+    packaged['video' + name] = mseSupport('video/mp4; codecs="' + codec + '"');
+    DISPLAY_SIZES.forEach((size) => {
+      const sizedCodec = name === 'H264' ? (size.height === 2160 ? 'avc1.640033' : size.height === 720 ? 'avc1.64001F' : codec)
+        : name.indexOf('HEVC') === 0 && size.height === 2160 ? codec.replace('L120', 'L150') : codec;
+      packaged['picture' + name + size.height] = canDisplaySize([sizedCodec], size.width, size.height);
+      // CAF documents this HDR10 codec query for the actual HDMI sink.
+      if (name === 'HEVC10') {
+        packaged['pictureHEVC10HDRPQ' + size.height] = pictureHDR['pictureHEVC10HDRPQ' + size.height] === true
+          || canDisplaySize(['hev1.2.6.L150'], size.width, size.height);
+      }
+    });
+  });
+  return Object.assign({}, pictureHDR, packaged, {
     mse: !!window.MediaSource,
     mp4box: typeof MP4Box !== 'undefined',
     videoH264: mseSupport('video/mp4; codecs="avc1.640028"'),
@@ -110,6 +147,7 @@ function capabilities() {
     canDisplayTrueHD: canDisplay('audio/mp4', 'mlpa'),
     canDisplayDTS: canDisplay('audio/mp4', 'dtsc'),
     canDisplayHEVC: canDisplay('video/mp4', 'hvc1.2.4.L120.90'),
+    videoDolbyVision: canDisplaySize(['dvhe.05.06'], 3840, 2160),
     display720: canDisplayHeight(720),
     display1080: canDisplayHeight(1080),
     display2160: canDisplayHeight(2160),
@@ -888,6 +926,8 @@ if (!PREVIEW) {
     const playbackConfig = new cast.framework.PlaybackConfig();
     const url = media.contentUrl || media.contentId || '';
     const isUniversal = url.indexOf('/transcode/universal/') >= 0;
+    const isMadeStream = custom.madeStream === true;
+    const usesStreamPlayer = isUniversal || isMadeStream;
     window.__dolbySplitActive = false;   // set again below for Dolby streams
     const streamCodecs = (typeof custom.streamCodecs === 'string' && custom.streamCodecs)
       ? custom.streamCodecs : null;
@@ -898,11 +938,11 @@ if (!PREVIEW) {
     // handler flips it on through CAF's own TextTracksManager.
     wantStreamSubtitle = custom.subtitleActive === true;
     wantStreamSubtitleLanguage = typeof custom.subtitleLanguage === 'string' ? custom.subtitleLanguage : null;
-    const dolbyStream = isUniversal && streamCodecs &&
+    const dolbyStream = usesStreamPlayer && streamCodecs &&
       /(^|,)\s*(ec-3|ac-3)\s*($|,)/.test(streamCodecs);
     const container = (typeof custom.streamContainer === 'string')
       ? custom.streamContainer : null;
-    if (isUniversal) {
+    if (usesStreamPlayer) {
       // ONE path for every stream: Shaka. Dolby streams ride the
       // Fmp4SplitTransmuxer (fmp4-split.js) registered through Shaka's own
       // plugin API — it extracts each track from the muxed segments with
@@ -948,7 +988,7 @@ if (!PREVIEW) {
         return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'X-Plex-Token=' + plexToken;
       };
       playbackConfig.manifestHandler = (manifest) => {
-        let out = manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2');
+        let out = isUniversal ? manifest.replace(/^(.+\.ts)(\s*)$/gm, '$1.m4s$2') : manifest;
         if (codecsAttr && out.indexOf('#EXT-X-STREAM-INF') >= 0 &&
             out.indexOf('CODECS=') < 0) {
           out = out.replace(/^#EXT-X-STREAM-INF:(.*)$/gm,
@@ -960,7 +1000,7 @@ if (!PREVIEW) {
         request2.url = withToken(request2.url);
       };
       playbackConfig.segmentRequestHandler = (request2) => {
-        request2.url = withToken(request2.url.replace('.ts.m4s', '.ts'));
+        request2.url = withToken(isUniversal ? request2.url.replace('.ts.m4s', '.ts') : request2.url);
       };
       playbackConfig.segmentHandler = (data) => {
         if (data && data.byteLength) { segmentBytes += data.byteLength; segmentBytesSeen = true; }
@@ -979,7 +1019,7 @@ if (!PREVIEW) {
            (codecsAttr ? (', CODECS="' + codecsAttr + '"') : ', codecs from init'));
     }
     playerManager.setPlaybackConfig(playbackConfig);
-    loadPlayer = isUniversal ? (window.__dolbySplitActive ? 'Shaka, Dolby split' : 'Shaka')
+    loadPlayer = usesStreamPlayer ? (window.__dolbySplitActive ? 'Shaka, Dolby split' : 'Shaka')
       : (/\.m3u8($|\?)/i.test(url) ? 'Shaka' : 'native player');
     const meta = media.metadata || {};
     const poster = (meta.images && meta.images[0] && meta.images[0].url) || null;
