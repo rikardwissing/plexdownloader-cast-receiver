@@ -59,3 +59,10 @@ assert.ok(queried.some((q) => q.codecs[0] === 'hev1.2.6.L150'));
 assert.equal(capabilityContext.result.pictureHEVC10HDRPQ1080, true);
 assert.equal(capabilityContext.result.pictureHEVC10HDRPQ2160, false);
 console.log('capability measurement regressions passed');
+
+const sizeQueries = [];
+const sizeContext = {context: {canDisplayType(...args) { sizeQueries.push(args); return true; }}};
+vm.createContext(sizeContext);
+vm.runInContext(source.slice(source.indexOf('function canDisplaySize('), source.indexOf('const DISPLAY_SIZES')), sizeContext);
+assert.equal(sizeContext.canDisplaySize(['avc1.640028'], 1920, 1080), true);
+assert.equal(sizeQueries[0][4], 30, 'explicit 30fps answer bounds sender copy approval');

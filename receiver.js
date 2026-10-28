@@ -42,7 +42,7 @@ function canDisplay(mime, codec) {
 
 function canDisplaySize(codecs, width, height) {
   return codecs.some((codec) => {
-    try { return !!context.canDisplayType('video/mp4', codec, width, height); } catch (e) { return false; }
+    try { return !!context.canDisplayType('video/mp4', codec, width, height, 30); } catch (e) { return false; }
   });
 }
 
@@ -119,7 +119,7 @@ function capabilities() {
     const codec = pictureCodecs[name];
     packaged['video' + name] = mseSupport('video/mp4; codecs="' + codec + '"');
     DISPLAY_SIZES.forEach((size) => {
-      const sizedCodec = name === 'H264' ? (size.height === 2160 ? 'avc1.640033' : size.height === 720 ? 'avc1.64001F' : codec)
+      const sizedCodec = name === 'H264' ? (size.height === 2160 ? 'avc1.640033' : codec)
         : name.indexOf('HEVC') === 0 && size.height === 2160 ? codec.replace('L120', 'L150') : codec;
       packaged['picture' + name + size.height] = canDisplaySize([sizedCodec], size.width, size.height);
       // CAF documents this HDR10 codec query for the actual HDMI sink.
