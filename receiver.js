@@ -231,6 +231,26 @@ function withOpenMediaSource(done) {
   setTimeout(() => finish(null), 3000);
 }
 
+const PACKER_FAMILIES = { avc1: 'h264', avc3: 'h264', hvc1: 'hevc', hev1: 'hevc', mp4a: 'aac', 'ac-3': 'ac3', 'ec-3': 'eac3' };
+
+function packerTakes(codec) {
+  if (typeof Fmp4Muxer === 'undefined') return false;
+  const family = PACKER_FAMILIES[String(codec).split('.')[0].toLowerCase()];
+  return !!family && Object.keys(Fmp4Muxer.packagedCodecs).some((id) => Fmp4Muxer.packagedCodecs[id] === family);
+}
+
+function answerContainer(container) {
+  const codecs = String(container.codecs || '').split(',').map((c) => c.trim()).filter(Boolean);
+  const type = codecs.length ? container.mime + '; codecs="' + codecs.join(',') + '"' : container.mime;
+  let canPlayType = '';
+  try { canPlayType = document.createElement('video').canPlayType(type) || ''; } catch (e) {}
+  let display = false;
+  try { display = !!context.canDisplayType(container.mime, codecs.join(',') || undefined); } catch (e) {}
+  const packs = container.mime === 'video/x-matroska' && codecs.length > 0 && codecs.every(packerTakes);
+  slog('canPlay container ' + type + ': canPlayType="' + canPlayType + '" display=' + display + ' packs=' + packs);
+  return { canPlayType, display, packs };
+}
+
 function answerCanPlay(msg, senderId) {
   const configs = Array.isArray(msg.configs) ? msg.configs : [];
   const answers = configs.map((config) => {
@@ -238,8 +258,9 @@ function answerCanPlay(msg, senderId) {
     if (msg.probe) answer.extended = mseSupport(canPlayExtendedType(config));
     return answer;
   });
+  const containers = (Array.isArray(msg.containers) ? msg.containers : []).map(answerContainer);
   const reply = () => context.sendCustomMessage(NS, senderId,
-    { type: 'canPlayAnswer', id: msg.id, answers, device: deviceCapabilities() });
+    { type: 'canPlayAnswer', id: msg.id, answers, containers, device: deviceCapabilities() });
   if (!msg.probe) return reply();
   withOpenMediaSource((source) => {
     configs.forEach((config, i) => {
@@ -1105,6 +1126,7 @@ if (!PREVIEW) {
       // null fetcher = plain HTTP Range, which is what this receiver has always
       // used; the WebRTC receiver injects a data-channel source instead.
       engine = new window.MseEngine(url, custom.audioTypeIndex || 0, null);
+      if (typeof custom.videoCodec === 'string') engine.videoCodec = custom.videoCodec;
       loadPlayer = 'MSE engine';
       engine.onAudioSwitch = (index) => reissue({ audioTypeIndex: index });
       engine.onEngineFailed = (reason) => {
@@ -1136,6 +1158,7 @@ if (!PREVIEW) {
           try { playerManager.seek(s); } catch (e) {}
         },
         log: slog,
+        videoCodec: custom.videoCodec,
         startAt: request.currentTime || 0,
         audioStrict: custom.audioStrict === true,
         onAudioFallback: (index, wanted, codec) => {

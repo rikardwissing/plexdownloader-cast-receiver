@@ -493,7 +493,19 @@ Fmp4Muxer.packagedCodecs = {
   'V_MPEG4/ISO/AVC': 'h264', 'V_MPEGH/ISO/HEVC': 'hevc', A_AAC: 'aac', A_AC3: 'ac3', A_EAC3: 'eac3',
 };
 
+Fmp4Muxer.codecFamily = function (codec) {
+  var fourcc = String(codec || '').slice(0, 4).toLowerCase();
+  return { avc1: 'avc', avc3: 'avc', hvc1: 'hevc', hev1: 'hevc' }[fourcc] || fourcc;
+};
+
 Fmp4Muxer.prototype.codecString = function () {
+  var own = this.ownCodecString_();
+  if (own && this.declared && this.track.type === 1 &&
+      Fmp4Muxer.codecFamily(this.declared) === Fmp4Muxer.codecFamily(own)) return this.declared;
+  return own;
+};
+
+Fmp4Muxer.prototype.ownCodecString_ = function () {
   var cp = this.track.codecPrivate;
   var id = this.track.codecId;
   if (!Fmp4Muxer.packagedCodecs[id]) return null;
@@ -821,6 +833,7 @@ function MkvEngine(url, audioTypeIndex, opts) {
   this.url = url;
   this.audioTypeIndex = audioTypeIndex || 0;
   this.totalBytes = opts.totalBytes || null;
+  this.videoCodec = typeof opts.videoCodec === 'string' ? opts.videoCodec : null;
   this.customFetcher_ = !!opts.fetcher;
   this.sizeProbe_ = null;
   this.landKeyMs_ = null;
@@ -1241,12 +1254,18 @@ MkvEngine.prototype.pumpFrom_ = function (ms) {
 // The codec string a track would mux to, or its raw codecId when unknown.
 MkvEngine.prototype.trackCodec_ = function (track) {
   var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
-  return new Fmp4Muxer(track, timescale).codecString() || track.codecId;
+  return this.muxer_(track, timescale).codecString() || track.codecId;
+};
+
+MkvEngine.prototype.muxer_ = function (track, timescale) {
+  var muxer = new Fmp4Muxer(track, timescale);
+  muxer.declared = this.videoCodec;
+  return muxer;
 };
 
 MkvEngine.prototype.trackSupported_ = function (track) {
   var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
-  var muxer = new Fmp4Muxer(track, timescale);
+  var muxer = this.muxer_(track, timescale);
   return !!muxer.codecString() && MediaSource.isTypeSupported(muxer.contentType());
 };
 
@@ -1338,7 +1357,7 @@ MkvEngine.prototype.openLanes_ = function () {
     for (i = 0; i < chosen.length; i++) {
       var track = chosen[i];
       var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
-      var muxer = new Fmp4Muxer(track, timescale);
+      var muxer = this.muxer_(track, timescale);
       var mime = muxer.contentType();
       var sb = this.mediaSource.addSourceBuffer(mime);
       var lane = { muxer: muxer, timeline: new MkvTrackTimeline(track, timescale),

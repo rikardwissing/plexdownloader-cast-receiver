@@ -206,13 +206,22 @@
     for(i=0;i<n;i++){out.set(samples[i].data,p);p+=samples[i].data.byteLength;}
     return buf;
   };
+  function codecFamily(c){
+    var fourcc=String(c||'').slice(0,4).toLowerCase();
+    return ({avc1:'avc',avc3:'avc',hvc1:'hevc',hev1:'hevc'})[fourcc]||fourcc;
+  }
+  MseEngine.prototype.videoType=function(codec){
+    var own=mimeCodec(codec);
+    return this.videoCodec&&codecFamily(this.videoCodec)===codecFamily(own)?this.videoCodec:own;
+  };
   MseEngine.prototype.onReady=function(info){
     this.readyFired=true;
     var video=info.videoTracks&&info.videoTracks[0];
     this.audioTracks=info.audioTracks||[];
     var audio=this.audioTracks[this.wantAudioIndex]||this.audioTracks[0];
     if(!video||!audio){playbackError('This video is missing a track the player needs.');return;}
-    if(!canPlay('video',mimeCodec(video.codec))){playbackError('This browser can’t decode the video: '+codecName(video.codec)+'.');return;}
+    var videoType=this.videoType(video.codec);
+    if(!canPlay('video',videoType)){playbackError('This browser can’t decode the video: '+codecName(video.codec)+'.');return;}
     /* An undecodable AUDIO track must not end the session. It used to:
        playbackError killed playback outright, and since switching tracks is
        driven from this same engine, the viewer was stranded on the one track
@@ -240,7 +249,7 @@
     if(info.duration&&info.timescale){try{this.mediaSource.duration=info.duration/info.timescale}catch(e){}}
     var self=this;
     try{
-      this.buffers.video=this.mediaSource.addSourceBuffer('video/mp4; codecs="'+mimeCodec(video.codec)+'"');
+      this.buffers.video=this.mediaSource.addSourceBuffer('video/mp4; codecs="'+videoType+'"');
       if(!silent) this.buffers.audio=this.mediaSource.addSourceBuffer('audio/mp4; codecs="'+mimeCodec(audio.codec)+'"');
     }catch(e){playbackError('This browser can’t decode this format.');return;}
     ['video','audio'].forEach(function(kind){
