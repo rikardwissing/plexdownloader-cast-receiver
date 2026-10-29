@@ -182,6 +182,77 @@ function capabilities() {
   });
 }
 
+function canPlayType(config) {
+  const mime = config.mime || (config.kind === 'audio' ? 'audio/mp4' : 'video/mp4');
+  return config.codecs ? mime + '; codecs="' + config.codecs + '"' : mime;
+}
+
+function canPlayExtendedType(config) {
+  let type = canPlayType(config);
+  ['width', 'height', 'framerate', 'bitrate'].forEach((key) => {
+    if (config[key]) type += '; ' + key + '=' + config[key];
+  });
+  if (config.hdr === 'pq') type += '; eotf=smpte2084';
+  if (config.hdr === 'hlg') type += '; eotf=arib-std-b67';
+  return type;
+}
+
+function canPlayDisplay(config) {
+  const mime = config.mime || (config.kind === 'audio' ? 'audio/mp4' : 'video/mp4');
+  try {
+    return !!context.canDisplayType(mime, config.codecs, config.width, config.height, config.framerate);
+  } catch (e) { return false; }
+}
+
+function deviceCapabilities() {
+  let caps = null;
+  try { caps = context.getDeviceCapabilities(); } catch (e) {}
+  const keys = (cast.framework.system && cast.framework.system.DeviceCapabilities) || {};
+  return Object.assign({}, caps, {
+    IS_HDR_SUPPORTED: caps && keys.IS_HDR_SUPPORTED ? caps[keys.IS_HDR_SUPPORTED] : null,
+    IS_DV_SUPPORTED: caps && keys.IS_DV_SUPPORTED ? caps[keys.IS_DV_SUPPORTED] : null,
+  });
+}
+
+function withOpenMediaSource(done) {
+  let settled = false;
+  const video = document.createElement('video');
+  const finish = (source) => {
+    if (settled) return;
+    settled = true;
+    done(source);
+    try { URL.revokeObjectURL(video.src); } catch (e) {}
+  };
+  try {
+    const source = new MediaSource();
+    source.addEventListener('sourceopen', () => finish(source));
+    video.src = URL.createObjectURL(source);
+  } catch (e) { finish(null); }
+  setTimeout(() => finish(null), 3000);
+}
+
+function answerCanPlay(msg, senderId) {
+  const configs = Array.isArray(msg.configs) ? msg.configs : [];
+  const answers = configs.map((config) => {
+    const answer = { display: canPlayDisplay(config), mse: mseSupport(canPlayType(config)) };
+    if (msg.probe) answer.extended = mseSupport(canPlayExtendedType(config));
+    return answer;
+  });
+  const reply = () => context.sendCustomMessage(NS, senderId,
+    { type: 'canPlayAnswer', id: msg.id, answers, device: deviceCapabilities() });
+  if (!msg.probe) return reply();
+  withOpenMediaSource((source) => {
+    configs.forEach((config, i) => {
+      if (!source) { answers[i].addSourceBuffer = 'no MediaSource'; return; }
+      try {
+        source.removeSourceBuffer(source.addSourceBuffer(canPlayType(config)));
+        answers[i].addSourceBuffer = true;
+      } catch (e) { answers[i].addSourceBuffer = String((e && e.name) || e); }
+    });
+    reply();
+  });
+}
+
 // Receiver-side logging lands in the sender's diagnostics file (CASTLOG
 // receiver message) — the only eyes we have on this code in the field.
 function slog(msg) {
@@ -1204,6 +1275,8 @@ if (!PREVIEW) {
     if (msg.type === 'ping') {
       context.sendCustomMessage(NS, event.senderId,
                                 { type: 'pong', capabilities: capabilities() });
+    } else if (msg.type === 'canPlay') {
+      answerCanPlay(msg, event.senderId);
     } else if (msg.type === 'stats') {
       context.sendCustomMessage(NS, event.senderId, playbackStats());
     } else if (msg.type === 'upNext') {
