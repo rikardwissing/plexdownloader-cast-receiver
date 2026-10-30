@@ -1536,18 +1536,38 @@ MkvEngine.prototype.stallCheck_ = function () {
   if (this.seekTo) {
     var hop = this.bufferedStartAfter_(t);
     var landing = hop != null && this.landKeyMs_ != null && Math.abs(hop * 1000 - this.landKeyMs_) < 1000;
-    if (hop != null && (hop - t < 2 || landing) && this.isBuffered_(hop + 0.05)) {
+    var starting = t <= 0.05 && hop != null && hop < 10;
+    if (hop != null && (hop - t < 2 || landing || starting) && this.isBuffered_(hop + 0.05)) {
       this.log('mkvengine: gap hop ' + t.toFixed(2) + 's -> ' + hop.toFixed(2) + 's');
       this.landKeyMs_ = null;
       try { this.seekTo(hop + 0.05); } catch (e) {}
       return;
     }
   }
-  if (t <= 0) return;
+  if (t <= 0) {
+    if (!this.startGapLogged_ && Date.now() - this.lastFetchDoneAt >= 3000) {
+      this.startGapLogged_ = true;
+      this.log('mkvengine: waiting at the start (' + this.rangesText_() + ')');
+    }
+    return;
+  }
   if (this.inflightAbort) return;                // pump is actively fetching
   if (Date.now() - this.lastFetchDoneAt < 3000) return;  // …or just was
-  this.log('mkvengine: gap at ' + Math.round(t) + 's — repump');
+  this.log('mkvengine: gap at ' + Math.round(t) + 's — repump (t=' + t.toFixed(2) + ' ' + this.rangesText_() + ')');
   this.repump_(t);
+};
+
+MkvEngine.prototype.rangesText_ = function () {
+  var parts = [];
+  for (var k in this.lanes) {
+    var ranges = [];
+    try {
+      var b = this.lanes[k].sb.buffered;
+      for (var i = 0; i < b.length && i < 4; i++) ranges.push(b.start(i).toFixed(2) + '-' + b.end(i).toFixed(2));
+    } catch (e) {}
+    parts.push((this.lanes[k].track.type === 1 ? 'video ' : 'audio ') + (ranges.join(',') || 'empty'));
+  }
+  return parts.join('; ');
 };
 
 // Where playable data resumes after `seconds`: the LATEST of the lanes'
