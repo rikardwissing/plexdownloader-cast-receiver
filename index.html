@@ -191,7 +191,7 @@
   <!-- Version badge lives INSIDE the idle screen so it hides with it —
        position:fixed still pins it to the corner while idle shows. -->
   <div style="position:fixed;right:10px;bottom:8px;font-size:1.2vh;letter-spacing:0.05em;
-              color:rgba(244,247,255,0.25);pointer-events:none">2026-10-30.2</div>
+              color:rgba(244,247,255,0.25);pointer-events:none" id="receiver-version"></div>
   <img class="mark" src="icon.png" alt="">
   <p class="wordmark">Portage</p>
   <h1 class="headline">Ready to cast</h1>
@@ -256,5 +256,10 @@ window.__dolbySplitActive = false;
 <script src="mkv-engine.js?v=2026-10-30.2"></script>
 <script src="fmp4-split.js?v=2026-10-16.1"></script>
 <script src="receiver.js?v=2026-10-30.2"></script>
+<script>
+  document.getElementById("receiver-version").textContent = [].map.call(document.scripts, function (s) {
+    return (s.src.match(/[?&]v=([^&]+)/) || [])[1] || "";
+  }).sort().pop();
+</script>
 </body>
 </html>
