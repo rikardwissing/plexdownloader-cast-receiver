@@ -791,6 +791,8 @@ if (!PREVIEW) {
   let loadHeight = 0;
   let loadAuto = false;
   let loadAudioRetry = false;
+  let loadFallback = false;
+  let qaFailTimer = null;
   let loadAudioCodec = null;
   let audioCheck = null;
   function clearAudioCheck() { if (audioCheck) { clearTimeout(audioCheck); audioCheck = null; } }
@@ -839,6 +841,12 @@ if (!PREVIEW) {
     stats.viewportHeight = Math.round(window.innerHeight || 0);
     stats.pixelRatio = window.devicePixelRatio || 1;
     const element = playingElement();
+    const anyElement = element || mediaElement();
+    if (!element && anyElement && typeof anyElement.getVideoPlaybackQuality === 'function') {
+      const quality = anyElement.getVideoPlaybackQuality();
+      stats.droppedFrames = quality.droppedVideoFrames;
+      stats.totalFrames = quality.totalVideoFrames;
+    }
     if (element) {
       stats.width = element.videoWidth;
       stats.height = element.videoHeight;
@@ -926,6 +934,14 @@ if (!PREVIEW) {
     }, 20000);
   }
   function failOrAwaitAudioRetry(verdict) {
+    if (loadFallback) {
+      loadFallback = false;
+      loadAudioRetry = false;
+      slog('the load failed - waiting for the sender to load a made version');
+      Subs.clear();
+      awaitSenderRetry(verdict);
+      return;
+    }
     if (!loadAudioRetry) {
       Screens.error("Can't play this video", verdict);
       return;
@@ -985,6 +1001,19 @@ if (!PREVIEW) {
     loadHeight = Number(custom.videoHeight) || 0;
     loadAuto = custom.autoResolution === true;
     loadAudioRetry = custom.audioRetry === true;
+    loadFallback = custom.fallback === true;
+    if (qaFailTimer) { clearTimeout(qaFailTimer); qaFailTimer = null; }
+    if (custom.qaFail === true) {
+      qaFailTimer = setTimeout(() => {
+        qaFailTimer = null;
+        slog('qa: faking a load error');
+        clearLoadWatch();
+        errorHandled = true;
+        reportLoadFailed('qa: faked load error', { track: 'stream' });
+        failOrAwaitAudioRetry('The QA hook faked a load error.');
+        try { playerManager.stop(); } catch (e) {}
+      }, 4000);
+    }
     displayReported = false;
     errorHandled = false;
     statsLogged = false;
