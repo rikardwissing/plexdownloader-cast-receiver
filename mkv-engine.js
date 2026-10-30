@@ -1387,7 +1387,7 @@ MkvEngine.prototype.openLanes_ = function () {
       var lane = { muxer: muxer, timeline: new MkvTrackTimeline(track, timescale),
                    sb: sb, queue: [], pending: [], pendingSinceMs: null, track: track };
       (function (self2, lane2) {
-        sb.addEventListener('updateend', function () { self2.drain_(lane2); });
+        sb.addEventListener('updateend', function () { self2.checkKept_(lane2); self2.drain_(lane2); });
         sb.addEventListener('error', function () {
           var hex = '';
           try {
@@ -1439,6 +1439,7 @@ MkvEngine.prototype.drain_ = function (lane) {
   if (!lane.queue.length) return;
   if (lane.quotaRetryAt && Date.now() < lane.quotaRetryAt) return;
   var fragment = lane.queue.shift();
+  lane.appendingMedia = fragment !== lane.initBytes;
   try {
     lane.sb.appendBuffer(fragment);
   } catch (e) {
@@ -1466,6 +1467,19 @@ MkvEngine.prototype.drain_ = function (lane) {
       return;
     }
     this.fatal_('append: ' + e);
+  }
+};
+
+// A video lane that keeps nothing from several appended fragments never will: the device found no frame to start from.
+MkvEngine.prototype.checkKept_ = function (lane) {
+  if (!lane.appendingMedia) return;
+  lane.appendingMedia = false;
+  if (lane.track.type !== 1) return;
+  var kept = false;
+  try { kept = lane.sb.buffered.length > 0; } catch (e) {}
+  lane.unkeptAppends = kept ? 0 : (lane.unkeptAppends || 0) + 1;
+  if (lane.unkeptAppends >= 4) {
+    this.fatal_('this device kept none of the picture (' + this.trackCodec_(lane.track) + ')', { track: 'video' });
   }
 };
 
