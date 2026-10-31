@@ -168,6 +168,7 @@ function capabilities() {
     // protect. It asks per codec now, and these are the answers it needs.
     audioFLAC: mseSupport('audio/mp4; codecs="flac"'),
     audioOpus: mseSupport('audio/mp4; codecs="opus"'),
+    audioMPEG: mseSupport('audio/mpeg'),
     // Can this device switch MUXED audio natively, with no engine at all?
     // If it can, the whole MseEngine here is unnecessary: its only reason to
     // exist is audio switching on multi-audio direct MP4s (the sender gates it
@@ -184,7 +185,7 @@ function capabilities() {
 
 function canPlayType(config) {
   const mime = config.mime || (config.kind === 'audio' ? 'audio/mp4' : 'video/mp4');
-  return config.codecs ? mime + '; codecs="' + config.codecs + '"' : mime;
+  return config.codecs && mime !== 'audio/mpeg' ? mime + '; codecs="' + config.codecs + '"' : mime;
 }
 
 function canPlayExtendedType(config) {
@@ -231,12 +232,8 @@ function withOpenMediaSource(done) {
   setTimeout(() => finish(null), 3000);
 }
 
-const PACKER_FAMILIES = { avc1: 'h264', avc3: 'h264', hvc1: 'hevc', hev1: 'hevc', mp4a: 'aac', 'ac-3': 'ac3', 'ec-3': 'eac3' };
-
 function packerTakes(codec) {
-  if (typeof Fmp4Muxer === 'undefined') return false;
-  const family = PACKER_FAMILIES[String(codec).split('.')[0].toLowerCase()];
-  return !!family && Object.keys(Fmp4Muxer.packagedCodecs).some((id) => Fmp4Muxer.packagedCodecs[id] === family);
+  return typeof Fmp4Muxer !== 'undefined' && typeof Fmp4Muxer.carries === 'function' && Fmp4Muxer.carries(codec);
 }
 
 function answerContainer(container) {

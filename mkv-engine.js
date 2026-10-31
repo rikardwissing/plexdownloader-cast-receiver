@@ -98,14 +98,21 @@ var MKV_ID = {
   CodecID: 0x86,
   CodecPrivate: 0x63A2,
   DefaultDuration: 0x23E383,
+  CodecDelay: 0x56AA,
   Language: 0x22B59C,
   Name: 0x536E,
   Video: 0xE0,
   PixelWidth: 0xB0,
   PixelHeight: 0xBA,
+  Colour: 0x55B0,
+  MatrixCoefficients: 0x55B1,
+  Range: 0x55B9,
+  TransferCharacteristics: 0x55BA,
+  Primaries: 0x55BB,
   Audio: 0xE1,
   SamplingFrequency: 0xB5,
   Channels: 0x9F,
+  BitDepth: 0x6264,
   Cues: 0x1C53BB6B,
   CuePoint: 0xBB,
   CueTime: 0xB3,
@@ -220,7 +227,7 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
     if (id.value !== MKV_ID.TrackEntry) { r.pos += size.value; continue; }
     var t = new MkvByteReader(r.readBytes(size.value), 0);
     var track = { number: 0, type: 0, codecId: '', codecPrivate: null,
-                  defaultDurationNs: 0, language: 'und', name: '',
+                  defaultDurationNs: 0, codecDelayNs: 0, language: 'und', name: '',
                   video: null, audio: null, isDefault: false };
     while (t.remaining() > 1) {
       var tid = t.readVint(true); var tsize = t.readVint(false);
@@ -232,6 +239,7 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
         case MKV_ID.CodecID: track.codecId = t.readString(tsize.value).replace(/\0+$/, ''); break;
         case MKV_ID.CodecPrivate: track.codecPrivate = t.readBytes(tsize.value); break;
         case MKV_ID.DefaultDuration: track.defaultDurationNs = t.readUint(tsize.value); break;
+        case MKV_ID.CodecDelay: track.codecDelayNs = t.readUint(tsize.value); break;
         case MKV_ID.Language: track.language = t.readString(tsize.value).replace(/\0+$/, ''); break;
         case MKV_ID.Name: track.name = t.readString(tsize.value); break;
         case MKV_ID.Video: {
@@ -242,6 +250,7 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
             if (!vid || !vsize) break;
             if (vid.value === MKV_ID.PixelWidth) track.video.width = v.readUint(vsize.value);
             else if (vid.value === MKV_ID.PixelHeight) track.video.height = v.readUint(vsize.value);
+            else if (vid.value === MKV_ID.Colour) track.video.colour = this.parseColour_(new MkvByteReader(v.readBytes(vsize.value), 0));
             else v.pos += vsize.value;
           }
           break;
@@ -254,6 +263,7 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
             if (!aid || !asize) break;
             if (aid.value === MKV_ID.SamplingFrequency) track.audio.sampleRate = a.readFloat(asize.value);
             else if (aid.value === MKV_ID.Channels) track.audio.channels = a.readUint(asize.value);
+            else if (aid.value === MKV_ID.BitDepth) track.audio.bitDepth = a.readUint(asize.value);
             else a.pos += asize.value;
           }
           break;
@@ -263,6 +273,20 @@ MkvDemuxer.prototype.parseTracks_ = function (r) {
     }
     this.tracks.push(track);
   }
+};
+
+MkvDemuxer.prototype.parseColour_ = function (r) {
+  var colour = { matrix: 2, transfer: 2, primaries: 2, range: 0 };
+  while (r.remaining() > 1) {
+    var id = r.readVint(true); var size = r.readVint(false);
+    if (!id || !size) break;
+    if (id.value === MKV_ID.MatrixCoefficients) colour.matrix = r.readUint(size.value);
+    else if (id.value === MKV_ID.TransferCharacteristics) colour.transfer = r.readUint(size.value);
+    else if (id.value === MKV_ID.Primaries) colour.primaries = r.readUint(size.value);
+    else if (id.value === MKV_ID.Range) colour.range = r.readUint(size.value);
+    else r.pos += size.value;
+  }
+  return colour;
 };
 
 // Cues element payload → seek table.
@@ -490,12 +514,124 @@ function Fmp4Muxer(track, timescale) {
 }
 
 Fmp4Muxer.packagedCodecs = {
-  'V_MPEG4/ISO/AVC': 'h264', 'V_MPEGH/ISO/HEVC': 'hevc', A_AAC: 'aac', A_AC3: 'ac3', A_EAC3: 'eac3',
+  'V_MPEG4/ISO/AVC': 'h264', 'V_MPEGH/ISO/HEVC': 'hevc', V_AV1: 'av1', V_VP9: 'vp9',
+  A_AAC: 'aac', A_AC3: 'ac3', A_EAC3: 'eac3', A_FLAC: 'flac', A_OPUS: 'opus', 'A_MPEG/L3': 'mp3',
 };
 
 Fmp4Muxer.codecFamily = function (codec) {
   var fourcc = String(codec || '').slice(0, 4).toLowerCase();
   return { avc1: 'avc', avc3: 'avc', hvc1: 'hevc', hev1: 'hevc' }[fourcc] || fourcc;
+};
+
+Fmp4Muxer.packagedFamily = function (codec) {
+  var c = String(codec || '').toLowerCase();
+  if (c === 'mp4a.69' || c === 'mp4a.6b') return 'mp3';
+  return { avc1: 'h264', avc3: 'h264', hvc1: 'hevc', hev1: 'hevc', av01: 'av1', vp09: 'vp9', mp4a: 'aac',
+           'ac-3': 'ac3', 'ec-3': 'eac3', flac: 'flac', opus: 'opus', mp3: 'mp3' }[c.split('.')[0]] || null;
+};
+
+Fmp4Muxer.carries = function (codec) {
+  var family = Fmp4Muxer.packagedFamily(codec);
+  return !!family && Object.keys(Fmp4Muxer.packagedCodecs).some(function (id) {
+    return Fmp4Muxer.packagedCodecs[id] === family;
+  });
+};
+
+Fmp4Muxer.mseType = function (kind, codecs) {
+  return codecs === 'mp3' ? 'audio/mpeg' : kind + '/mp4; codecs="' + codecs + '"';
+};
+
+Fmp4Muxer.timescaleFor = function (track) {
+  if (track.type === 1) return 90000;
+  if (track.codecId === 'A_OPUS') return 48000;
+  var flac = track.codecId === 'A_FLAC' ? mkvFlacInfo(track.codecPrivate) : null;
+  return flac ? flac.sampleRate : Math.round(track.audio.sampleRate);
+};
+
+Fmp4Muxer.needsKeyframe = function (track) {
+  if (track.codecId !== 'V_VP9' || track.firstKeyframe) return false;
+  var cp = mkvVp9Private(track.codecPrivate);
+  return cp.profile == null || cp.depth == null;
+};
+
+function mkvPad2(n) { return (n < 10 ? '0' : '') + n; }
+
+function mkvFlacInfo(cp) {
+  if (!cp) return null;
+  var at = cp.length >= 4 && cp[0] === 0x66 && cp[1] === 0x4C && cp[2] === 0x61 && cp[3] === 0x43 ? 4 : 0;
+  if (cp.length < at + 38 || (cp[at] & 0x7F) !== 0) return null;
+  var s = cp.subarray(at + 4, at + 38);
+  return { streamInfo: s,
+           sampleRate: (s[10] << 12) | (s[11] << 4) | (s[12] >> 4),
+           channels: ((s[12] >> 1) & 7) + 1,
+           bitsPerSample: (((s[12] & 1) << 4) | (s[13] >> 4)) + 1 };
+}
+
+function mkvVp9Private(cp) {
+  var out = { profile: null, level: null, depth: null, chroma: null };
+  var names = { 1: 'profile', 2: 'level', 3: 'depth', 4: 'chroma' };
+  for (var i = 0; cp && i + 2 < cp.length; i += 2 + cp[i + 1]) {
+    if (names[cp[i]] && cp[i + 1] === 1) out[names[cp[i]]] = cp[i + 2];
+  }
+  return out;
+}
+
+function mkvVp9Keyframe(d) {
+  if (!d || d.length < 8) return null;
+  var pos = 0;
+  function bits(n) {
+    var v = 0;
+    for (var i = 0; i < n; i++, pos++) v = (v << 1) | ((d[pos >> 3] >> (7 - (pos & 7))) & 1);
+    return v;
+  }
+  if (bits(2) !== 2) return null;
+  var profile = bits(1);
+  profile |= bits(1) << 1;
+  if (profile === 3) bits(1);
+  if (bits(1) || bits(1)) return null;
+  bits(2);
+  if (bits(24) !== 0x498342) return null;
+  var depth = profile >= 2 ? (bits(1) ? 12 : 10) : 8;
+  var rgb = bits(3) === 7;
+  var fullRange = rgb ? 1 : bits(1);
+  var chroma = rgb ? 3 : 1;
+  if (!rgb && (profile === 1 || profile === 3)) {
+    var sx = bits(1), sy = bits(1);
+    chroma = sx ? (sy ? 1 : 2) : 3;
+  }
+  return { profile: profile, depth: depth, chroma: chroma, fullRange: fullRange };
+}
+
+Fmp4Muxer.vp9Levels = [
+  [10, 829440, 36864, 512], [11, 2764800, 73728, 768], [20, 4608000, 122880, 960],
+  [21, 9216000, 245760, 1344], [30, 20736000, 552960, 2048], [31, 36864000, 983040, 2752],
+  [40, 83558400, 2228224, 4160], [41, 160432128, 2228224, 4160], [50, 311951360, 8912896, 8384],
+  [51, 588251136, 8912896, 8384], [52, 1176502272, 8912896, 8384], [60, 1176502272, 35651584, 16832],
+  [61, 2353004544, 35651584, 16832], [62, 4706009088, 35651584, 16832],
+];
+
+Fmp4Muxer.prototype.vp9Info_ = function () {
+  var t = this.track;
+  var cp = mkvVp9Private(t.codecPrivate);
+  var key = mkvVp9Keyframe(t.firstKeyframe) || {};
+  var profile = cp.profile != null ? cp.profile : key.profile;
+  var depth = cp.depth != null ? cp.depth : key.depth;
+  if (profile == null || depth == null) return null;
+  var level = cp.level;
+  if (!level) {
+    var w = t.video.width, h = t.video.height;
+    var fps = t.defaultDurationNs ? 1e9 / t.defaultDurationNs : 30;
+    level = 62;
+    for (var i = 0; i < Fmp4Muxer.vp9Levels.length; i++) {
+      var l = Fmp4Muxer.vp9Levels[i];
+      if (w * h <= l[2] && Math.max(w, h) <= l[3] && w * h * fps <= l[1] * 1.001) { level = l[0]; break; }
+    }
+  }
+  var colour = (t.video && t.video.colour) || { matrix: 2, transfer: 2, primaries: 2, range: 0 };
+  return { profile: profile, level: level, depth: depth,
+           chroma: cp.chroma != null ? cp.chroma : (key.chroma != null ? key.chroma : 1),
+           fullRange: key.fullRange != null ? key.fullRange : (colour.range === 2 ? 1 : 0),
+           colour: colour };
 };
 
 Fmp4Muxer.prototype.codecString = function () {
@@ -525,17 +661,84 @@ Fmp4Muxer.prototype.ownCodecString_ = function () {
            '.' + (rev >>> 0).toString(16).toUpperCase() +
            '.' + (tier ? 'H' : 'L') + level + '.B0';
   }
+  if (id === 'V_AV1' && cp && cp.length >= 4 && (cp[0] & 0x80)) {
+    var depth = cp[2] & 0x40 ? (cp[2] & 0x20 ? 12 : 10) : 8;
+    return 'av01.' + (cp[1] >> 5) + '.' + mkvPad2(cp[1] & 0x1F) + (cp[2] & 0x80 ? 'H' : 'M') + '.' + mkvPad2(depth);
+  }
+  if (id === 'V_VP9') {
+    var vp9 = this.vp9Info_();
+    return vp9 ? 'vp09.' + mkvPad2(vp9.profile) + '.' + mkvPad2(vp9.level) + '.' + mkvPad2(vp9.depth) : null;
+  }
   if (id === 'A_AAC' && cp && cp.length >= 1) {
     return 'mp4a.40.' + (cp[0] >> 3);
   }
   if (id === 'A_AC3') return 'ac-3';
   if (id === 'A_EAC3') return 'ec-3';
+  if (id === 'A_FLAC') return mkvFlacInfo(cp) ? 'flac' : null;
+  if (id === 'A_OPUS') return cp && cp.length >= 19 ? 'opus' : null;
+  if (id === 'A_MPEG/L3') return 'mp3';
   return null;
 };
 
 Fmp4Muxer.prototype.contentType = function () {
-  var kind = this.track.type === 1 ? 'video' : 'audio';
-  return kind + '/mp4; codecs="' + this.codecString() + '"';
+  return Fmp4Muxer.mseType(this.track.type === 1 ? 'video' : 'audio', this.codecString());
+};
+
+Fmp4Muxer.prototype.rawAudio = function () {
+  return this.track.codecId === 'A_MPEG/L3';
+};
+
+Fmp4Muxer.prototype.sampleData = function (data) {
+  if (this.track.codecId !== 'V_AV1') return data;
+  var kept = [], size = 0, pos = 0, dropped = false;
+  while (pos < data.length) {
+    var start = pos, header = data[pos];
+    pos += 1 + ((header >> 2) & 1);
+    var length = data.length - pos;
+    if (header & 2) {
+      length = 0;
+      for (var i = 0; i < 8 && pos < data.length; i++) {
+        var b = data[pos++];
+        length += (b & 0x7F) * Math.pow(2, 7 * i);
+        if (!(b & 0x80)) break;
+      }
+    }
+    var end = Math.min(data.length, pos + length);
+    if (((header >> 3) & 0x0F) === 2) dropped = true;
+    else { kept.push(data.subarray(start, end)); size += end - start; }
+    pos = end;
+  }
+  if (!dropped) return data;
+  var out = new Uint8Array(size), at = 0;
+  for (var k = 0; k < kept.length; k++) { out.set(kept[k], at); at += kept[k].length; }
+  return out;
+};
+
+Fmp4Muxer.prototype.frameTicks = function (data) {
+  var id = this.track.codecId;
+  if (id === 'A_OPUS' && data.length) {
+    var config = data[0] >> 3;
+    var size = config < 12 ? [480, 960, 1920, 2880][config & 3]
+      : config < 16 ? [480, 960][config & 1] : [120, 240, 480, 960][config & 3];
+    var code = data[0] & 3;
+    return size * (code === 0 ? 1 : code < 3 ? 2 : (data.length > 1 ? data[1] & 0x3F : 1));
+  }
+  if (id === 'A_FLAC' && data.length >= 6 && data[0] === 0xFF && (data[1] & 0xFE) === 0xF8) {
+    var bs = data[2] >> 4;
+    if (bs === 1) return 192;
+    if (bs >= 2 && bs <= 5) return 576 << (bs - 2);
+    if (bs >= 8) return 256 << (bs - 8);
+    if (bs !== 6 && bs !== 7) return null;
+    var lead = data[4], n = 0;
+    while (lead & 0x80) { n++; lead = (lead << 1) & 0xFF; }
+    var at = 4 + Math.max(1, n);
+    return bs === 6 ? data[at] + 1 : ((data[at] << 8) | data[at + 1]) + 1;
+  }
+  if (id === 'A_MPEG/L3' && data.length >= 4 && data[0] === 0xFF && (data[1] & 0xE0) === 0xE0) {
+    var layer = (data[1] >> 1) & 3;
+    return layer === 3 ? 384 : layer === 2 || ((data[1] >> 3) & 3) === 3 ? 1152 : 576;
+  }
+  return null;
 };
 
 Fmp4Muxer.prototype.sampleEntry_ = function () {
@@ -555,8 +758,28 @@ Fmp4Muxer.prototype.sampleEntry_ = function () {
     for (i = 0; i < 32; i++) body.push(0);             // compressorname
     mkvWriteU16(body, 0x0018);                         // depth
     mkvWriteU16(body, 0xFFFF);                         // pre_defined
+    if (t.codecId === 'V_AV1') return mkvBox('av01', body, mkvBox('av1C', t.codecPrivate));
+    if (t.codecId === 'V_VP9') {
+      var vp9 = this.vp9Info_();
+      var vpcC = [vp9.profile, vp9.level, (vp9.depth << 4) | (vp9.chroma << 1) | vp9.fullRange,
+                  vp9.colour.primaries, vp9.colour.transfer, vp9.colour.matrix, 0, 0];
+      return mkvBox('vp09', body, mkvFull('vpcC', 1, 0, vpcC));
+    }
     var config = mkvBox(isAvc ? 'avcC' : 'hvcC', t.codecPrivate);
     return mkvBox(isAvc ? 'avc1' : 'hvc1', body, config);
+  }
+  if (t.codecId === 'A_FLAC') {
+    var flac = mkvFlacInfo(t.codecPrivate);
+    var dfLa = [0x80, 0, 0, 34];
+    for (var f = 0; f < flac.streamInfo.length; f++) dfLa.push(flac.streamInfo[f]);
+    return mkvBox('fLaC', this.audioEntryHead_(flac.channels, flac.bitsPerSample, flac.sampleRate),
+                  mkvFull('dfLa', 0, 0, dfLa));
+  }
+  if (t.codecId === 'A_OPUS') {
+    var head = t.codecPrivate;
+    var dOps = [0, head[9], head[11], head[10], head[15], head[14], head[13], head[12], head[17], head[16], head[18]];
+    for (var o = 19; head[18] && o < head.length; o++) dOps.push(head[o]);
+    return mkvBox('Opus', this.audioEntryHead_(head[9], 16, 48000), mkvBox('dOps', dOps));
   }
   // Audio. AAC rides mp4a+esds (proven in the browser test). AC-3/E-AC-3
   // ride the CANONICAL ac-3/ec-3 sample entries with dac3/dec3 parsed from
@@ -589,6 +812,17 @@ Fmp4Muxer.prototype.sampleEntry_ = function () {
   es.push(6, 1, 2);                                    // SLConfig
   var esds = mkvFull('esds', 0, 0, [3, es.length].concat(es));
   return mkvBox('mp4a', a, esds);
+};
+
+Fmp4Muxer.prototype.audioEntryHead_ = function (channels, sampleSize, sampleRate) {
+  var a = [0, 0, 0, 0, 0, 0];
+  mkvWriteU16(a, 1);
+  mkvWriteU32(a, 0); mkvWriteU32(a, 0);
+  mkvWriteU16(a, channels);
+  mkvWriteU16(a, sampleSize);
+  mkvWriteU32(a, 0);
+  mkvWriteU32(a, sampleRate > 65535 ? 0 : (sampleRate << 16) >>> 0);
+  return a;
 };
 
 // The audio-specific config boxes Dolby entries need, read from the first
@@ -652,6 +886,7 @@ Fmp4Muxer.prototype.needsFirstFrame = function () {
 };
 
 Fmp4Muxer.prototype.initSegment = function (durationMs) {
+  if (this.rawAudio()) return null;
   var ts = this.timescale;
   var t = this.track;
   var mvhd = [];
@@ -721,6 +956,14 @@ Fmp4Muxer.prototype.initSegment = function (durationMs) {
 // samples: [{dts, pts, duration, keyframe, data}] on this.timescale.
 Fmp4Muxer.prototype.fragment = function (samples) {
   this.seq++;
+  if (this.rawAudio()) {
+    var size = 0, at = 0;
+    for (var r = 0; r < samples.length; r++) size += samples[r].data.length;
+    var raw = new Uint8Array(size);
+    for (r = 0; r < samples.length; r++) { raw.set(samples[r].data, at); at += samples[r].data.length; }
+    raw.timestampOffset = (samples[0].pts - Math.max(0, this.track.codecDelayNs * this.timescale / 1e9 - 529)) / this.timescale;
+    return raw;
+  }
   var trun = [];
   mkvWriteU32(trun, samples.length);
   mkvWriteU32(trun, 0);                                // data_offset placeholder
@@ -785,8 +1028,8 @@ function MkvTrackTimeline(track, timescale) {
   // block timestamp — the codec defines the spacing: 1024 samples per AAC
   // frame, 1536 per (E-)AC-3 frame, on the sample-rate timescale.
   if (!this.frameTicks && track.type === 2) {
-    var samplesPerFrame = track.codecId === 'A_AAC' ? 1024 : 1536;
-    this.frameTicks = Math.round(samplesPerFrame * timescale / track.audio.sampleRate);
+    var samplesPerFrame = { A_AAC: 1024, 'A_MPEG/L3': 1152, A_FLAC: 4096 }[track.codecId] || 1536;
+    this.frameTicks = track.codecId === 'A_OPUS' ? 960 : Math.round(samplesPerFrame * timescale / track.audio.sampleRate);
   }
   this.nextDts = null;
   this.prevPts = null;
@@ -794,7 +1037,7 @@ function MkvTrackTimeline(track, timescale) {
   this.settled = false;
 }
 MkvTrackTimeline.prototype.reset = function () {
-  this.nextDts = null; this.prevPts = null; this.pairOpen = false; this.settled = false;
+  this.nextDts = null; this.prevPts = null; this.pairOpen = false; this.settled = false; this.laceNext = null;
 };
 MkvTrackTimeline.prototype.settle = function (samples) {
   if (this.settled || !samples.length) return;
@@ -818,8 +1061,8 @@ MkvTrackTimeline.prototype.isSecondField = function (raw) {
 };
 MkvTrackTimeline.prototype.convert = function (raw) {
   var pts = Math.round(raw.ptsMs * this.timescale / 1000);
-  var dur = this.frameTicks;
-  if (raw.laceCount > 1 && dur) pts += raw.laceIndex * dur;
+  var dur = raw.frameTicks || this.frameTicks;
+  if (raw.laceCount > 1 && raw.laceIndex > 0 && this.laceNext != null) pts = this.laceNext;
   if (!dur) {
     dur = this.prevPts != null && pts > this.prevPts
       ? (pts - this.prevPts) : Math.round(this.timescale / 30);
@@ -838,6 +1081,7 @@ MkvTrackTimeline.prototype.convert = function (raw) {
   var dts = this.nextDts;
   this.nextDts += dur;
   this.prevPts = pts;
+  this.laceNext = pts + dur;
   return { dts: dts, pts: pts, duration: dur, keyframe: raw.keyframe, data: raw.data };
 };
 
@@ -1098,6 +1342,8 @@ MkvEngine.prototype.start_ = function () {
   growHeader(256 * 1024).then(function (parsed) {
     if (!parsed || self.dead) return;
     return self.locateCues_().then(function () {
+      return self.primeKeyframes_();
+    }).then(function () {
       if (self.dead) return;
       self.openLanes_();
     });
@@ -1145,6 +1391,29 @@ MkvEngine.prototype.locateCues_ = function () {
       ? demux.cues.length + ' cue points' + (hops ? ' via ' + hops + ' chained SeekHead(s)' : '')
       : 'no cues — seeks estimate a byte offset and resync on a cluster'));
   });
+};
+
+MkvEngine.prototype.primeKeyframes_ = function () {
+  var self = this;
+  var waiting = {}, left = 0;
+  for (var i = 0; i < this.demux.tracks.length; i++) {
+    if (Fmp4Muxer.needsKeyframe(this.demux.tracks[i])) { waiting[this.demux.tracks[i].number] = this.demux.tracks[i]; left++; }
+  }
+  var start = this.demux.firstClusterOffset;
+  function read(size) {
+    return self.fetchRange_(start, start + size - 1, null).then(function (buf) {
+      var u8 = new Uint8Array(buf);
+      try {
+        self.demux.parseClusters(u8, start, function (number, raw) {
+          var t = waiting[number];
+          if (t && raw.keyframe && !t.firstKeyframe) { t.firstKeyframe = raw.data; left--; }
+        });
+      } catch (e) {}
+      if (left > 0 && u8.length >= size && size < 16 * 1024 * 1024) return read(size * 2);
+    });
+  }
+  if (!left) return Promise.resolve();
+  return read(1024 * 1024).then(null, function (e) { self.log('mkvengine: no first keyframe (' + e + ')'); });
 };
 
 // Content-Length is CORS-safelisted where Content-Range is not, and bytes=0- is how every <video> element opens a file.
@@ -1277,7 +1546,7 @@ MkvEngine.prototype.pumpFrom_ = function (ms) {
 // for each, and kick the first pump.
 // The codec string a track would mux to, or its raw codecId when unknown.
 MkvEngine.prototype.trackCodec_ = function (track) {
-  var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
+  var timescale = Fmp4Muxer.timescaleFor(track);
   return this.muxer_(track, timescale).codecString() || track.codecId;
 };
 
@@ -1288,7 +1557,7 @@ MkvEngine.prototype.muxer_ = function (track, timescale) {
 };
 
 MkvEngine.prototype.trackSupported_ = function (track) {
-  var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
+  var timescale = Fmp4Muxer.timescaleFor(track);
   var muxer = this.muxer_(track, timescale);
   return !!muxer.codecString() && MediaSource.isTypeSupported(muxer.contentType());
 };
@@ -1380,7 +1649,7 @@ MkvEngine.prototype.openLanes_ = function () {
     // buffers: the "filling in" scrubber of 2026-08-24.
     for (i = 0; i < chosen.length; i++) {
       var track = chosen[i];
-      var timescale = track.type === 1 ? 90000 : Math.round(track.audio.sampleRate);
+      var timescale = Fmp4Muxer.timescaleFor(track);
       var muxer = this.muxer_(track, timescale);
       var mime = muxer.contentType();
       var sb = this.mediaSource.addSourceBuffer(mime);
@@ -1407,7 +1676,7 @@ MkvEngine.prototype.openLanes_ = function () {
       var opened = this.lanes[k];
       if (!opened.muxer.needsFirstFrame()) {
         opened.initBytes = opened.muxer.initSegment(this.demux.durationMs());
-        opened.queue.push(opened.initBytes);
+        if (opened.initBytes) opened.queue.push(opened.initBytes);
         opened.initSent = true;
         this.drain_(opened);
       }
@@ -1441,6 +1710,7 @@ MkvEngine.prototype.drain_ = function (lane) {
   var fragment = lane.queue.shift();
   lane.appendingMedia = fragment !== lane.initBytes;
   try {
+    if (fragment.timestampOffset != null) lane.sb.timestampOffset = fragment.timestampOffset;
     lane.sb.appendBuffer(fragment);
   } catch (e) {
     if (e && e.name === 'QuotaExceededError') {
@@ -1689,8 +1959,8 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   }
   if (!lane) return false;
   if (String(newTrack.number) === String(oldNum)) return true;
-  var timescale = Math.round(newTrack.audio.sampleRate);
-  var muxer = new Fmp4Muxer(newTrack, timescale);
+  var timescale = Fmp4Muxer.timescaleFor(newTrack);
+  var muxer = this.muxer_(newTrack, timescale);
   var codec = muxer.codecString();
   // An undecodable pick REFUSES and keeps playing — fatal_ here killed the
   // whole cast for choosing a Dolby track on a browser without the decoder.
@@ -1709,6 +1979,10 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   try {
     if (lane.sb.updating) lane.sb.abort();
     if (mime !== oldMime) lane.sb.changeType(mime);
+    if (!muxer.rawAudio() && lane.muxer.rawAudio()) {
+      lane.sb.mode = 'segments';
+      lane.sb.timestampOffset = 0;
+    }
     // Drop the old track's not-yet-played audio so the new track is HEARD
     // now, not a read-ahead minute from now.
     var now = this.getTime() || 0;
@@ -1726,7 +2000,8 @@ MkvEngine.prototype.setAudioTrack = function (typeIndex) {
   this.lanes[newTrack.number] = lane;
   this.audioTypeIndex = typeIndex || 0;
   this.log('mkvengine: audio -> track ' + newTrack.number + ' (' + mime + ')');
-  this.repump_(this.getTime() || 0);
+  this.repump_(now);
+  if (mime !== oldMime && this.seekTo) { try { this.seekTo(now); } catch (e) {} }
   return true;
 };
 
@@ -1781,7 +2056,7 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
       // Dolby lanes build their init from the first frame's own header.
       lane.muxer.noteFirstFrame(raw.data);
       lane.initBytes = lane.muxer.initSegment(self.demux.durationMs());
-      lane.queue.unshift(lane.initBytes);
+      if (lane.initBytes) lane.queue.unshift(lane.initBytes);
       lane.initSent = true;
     }
     if (isVideo && lane.timeline.isSecondField(raw) && lane.pending.length) {
@@ -1792,6 +2067,8 @@ MkvEngine.prototype.pump_ = function (startOffset, landMs) {
       first.data = pair;
       return;
     }
+    raw.data = lane.muxer.sampleData(raw.data);
+    raw.frameTicks = lane.muxer.frameTicks(raw.data);
     var sample = lane.timeline.convert(raw);
     lane.pending.push(sample);
     if (lane.pendingSinceMs == null) lane.pendingSinceMs = raw.ptsMs;

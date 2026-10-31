@@ -52,7 +52,7 @@ assert.equal(result.sent.type, 'canPlayAnswer');
 assert.equal(result.sent.id, 'q1');
 assert.deepEqual(result.sent.answers, [{ display: true, mse: true }, { display: true, mse: false }]);
 assert.deepEqual(result.sent.containers[0], { canPlayType: 'maybe', display: false, packs: true });
-assert.equal(result.sent.containers[1].packs, false, 'the packer has no Opus');
+assert.equal(result.sent.containers[1].packs, true, 'the packer carries Opus');
 assert.deepEqual(result.sent.containers[2], { canPlayType: 'probably', display: true, packs: false });
 assert.equal(result.sent.device.IS_HDR_SUPPORTED, false);
 assert.equal(result.sent.device.IS_DV_SUPPORTED, false);
@@ -61,6 +61,27 @@ assert.ok(result.logs.some((line) => line.includes('video/x-matroska; codecs="av
 result = ask({ type: 'canPlay', id: 'q2', configs: [{ kind: 'video', codecs: 'avc1.640033', width: 1920, height: 1080, framerate: 30 }] }, livingRoom);
 assert.deepEqual(result.sent.answers, [{ display: false, mse: false }]);
 assert.deepEqual(result.sent.containers, []);
+
+const asked = [];
+result = ask({
+  type: 'canPlay', id: 'q3',
+  configs: [
+    { kind: 'video', mime: 'video/mp4', codecs: 'av01.0.08M.10', width: 1920, height: 1080, framerate: 24 },
+    { kind: 'video', mime: 'video/mp4', codecs: 'vp09.00.40.08', width: 1920, height: 1080, framerate: 24 },
+    { kind: 'audio', mime: 'audio/mpeg', codecs: 'mp3' },
+    { kind: 'audio', mime: 'audio/mp4', codecs: 'flac' },
+  ],
+  containers: ['av01.0.08M.10,opus', 'vp09.00.40.08,flac', 'avc1.640028,mp3', 'avc1.640028,dtsc', 'avc1.640028,vorbis']
+    .map((codecs) => ({ mime: 'video/x-matroska', codecs })),
+}, {
+  mse: (type) => { asked.push(type); return !/av01|x-matroska/.test(type) && type !== 'audio/mpeg; codecs="mp3"'; },
+  display: (mime, codecs) => mime !== 'video/x-matroska' && !/av01/.test(codecs || ''),
+  canPlayType: () => 'maybe',
+});
+assert.deepEqual(result.sent.answers, [{ display: false, mse: false }, { display: true, mse: true },
+  { display: true, mse: true }, { display: true, mse: true }], 'each codec is asked as the packer plays it');
+assert.ok(asked.includes('audio/mpeg'));
+assert.deepEqual(result.sent.containers.map((c) => c.packs), [true, true, true, false, false]);
 
 const avcC = new Uint8Array([1, 0x64, 0x00, 0x33, 0xff, 0xe1]);
 const video = { type: 1, codecId: 'V_MPEG4/ISO/AVC', codecPrivate: avcC };
