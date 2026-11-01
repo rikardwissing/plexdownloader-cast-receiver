@@ -623,8 +623,8 @@ document.addEventListener('DOMContentLoaded', () => {
     Screens.loading('Bluey — S03E01 — Perfect',
                     'https://placehold.co/400x400/0b0d22/19d8e6?text=B');
   } else if (PREVIEW === 'error') {
-    Screens.error("Can't play this video",
-                  "This device can't decode the video or audio format.");
+    Screens.error("Couldn't play this video",
+                  "This TV can't play the video or audio format.");
   } else if (PREVIEW === 'subtitles') {
     Screens.show('playback');
     Subs.paint("We'll need to see the receipts.\nAll of them.");
@@ -639,13 +639,13 @@ document.addEventListener('DOMContentLoaded', () => {
 // element's own failures (decode/format), 3xx segment/network, 4xx manifest.
 function errorMessage(code) {
   if (code === 102 || code === 104 || code === 110) {
-    return "This device can't decode the video or audio format.";
+    return "This TV can't play the video or audio format.";
   }
   if (code === 103 || (code >= 300 && code < 400)) {
-    return 'The stream could not be fetched from the sender.';
+    return "Couldn't fetch the stream from the app.";
   }
   if (code >= 400 && code < 500) {
-    return "The stream's playlist could not be read.";
+    return "Couldn't read the stream's playlist.";
   }
   return 'Something went wrong during playback.';
 }
@@ -675,7 +675,7 @@ window.tvReport = slog;
 window.tvHelpers = {
   canPlay: (kind, codec) => mseSupport(kind + '/mp4; codecs="' + codec + '"'),
   codecName: (c) => String(c || ''),
-  playbackError: (msg) => Screens.error("Can't play this video", msg),
+  playbackError: (msg) => Screens.error("Couldn't play this video", msg),
   // Survivable trouble. NOT Screens.error, which replaces playback with an error
   // card: the point is that the viewer keeps watching and can still pick a track
   // that works. It rides slog into the sender's diagnostics instead.
@@ -912,14 +912,14 @@ if (!PREVIEW) {
     if (displayReported) return;
     displayReported = true;
     const maxHeight = maxDisplayHeight();
-    const verdict = 'This device plays video up to ' + maxHeight + 'p.';
+    const verdict = 'This TV plays video up to ' + maxHeight + 'p.';
     slog('the device refused ' + loadHeight + 'p video, it plays up to ' + maxHeight + 'p' +
          (loadAuto ? ' - waiting for the sender to step down' : ''));
     clearLoadWatch();
     clearSteppingDown();
     Subs.clear();
     if (loadAuto) awaitSenderRetry(verdict);
-    else Screens.error("Can't play this video", verdict);
+    else Screens.error("Couldn't play this video", verdict);
     reportLoadFailed('display', { track: 'video', maxHeight });
   }
   function awaitSenderRetry(verdict) {
@@ -927,7 +927,7 @@ if (!PREVIEW) {
     Screens.loading(loadTitle, loadPoster);
     steppingDown = setTimeout(() => {
       steppingDown = null;
-      Screens.error("Can't play this video", verdict);
+      Screens.error("Couldn't play this video", verdict);
     }, 20000);
   }
   function failOrAwaitAudioRetry(verdict) {
@@ -940,7 +940,7 @@ if (!PREVIEW) {
       return;
     }
     if (!loadAudioRetry) {
-      Screens.error("Can't play this video", verdict);
+      Screens.error("Couldn't play this video", verdict);
       return;
     }
     loadAudioRetry = false;
@@ -1202,8 +1202,8 @@ if (!PREVIEW) {
         teardownEngine();
         Subs.clear();
         const names = detail && detail.codecs ? detail.codecs.map(codecLabel).join(', ') : '';
-        Screens.error("Can't play this video", detail && names
-          ? 'This device can\'t play ' + names + ' ' + detail.track + '.'
+        Screens.error("Couldn't play this video", detail && names
+          ? 'This TV can\'t play ' + names + ' ' + detail.track + '.'
           : String(reason));
         reportLoadFailed(reason, detail);
         try { playerManager.stop(); } catch (e) {}
@@ -1308,7 +1308,7 @@ if (!PREVIEW) {
     if (networkFailure(e)) {
       loadAudioRetry = false;
       clearSteppingDown();
-      Screens.error("Can't play this video", 'The media server stopped sending the stream.');
+      Screens.error("Couldn't play this video", 'The server stopped sending the stream.');
       reportLoadFailed('network', { track: 'stream' });
       return;
     }
