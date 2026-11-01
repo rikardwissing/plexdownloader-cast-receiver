@@ -8,6 +8,8 @@ const start = source.indexOf('    const playbackConfig = new cast.framework.Play
 const end = source.indexOf('    playerManager.setPlaybackConfig(playbackConfig);', start)
   + '    playerManager.setPlaybackConfig(playbackConfig);'.length;
 assert.ok(start > 0 && end > start);
+const mseCodecs = vm.runInNewContext(source.slice(source.indexOf('const MSE_AUDIO_NAMES'),
+  source.indexOf('\n}\n', source.indexOf('function mseCodecs')) + 3) + 'mseCodecs;');
 function load(url, custom) {
   let config;
   const window = { __fmp4SplitRegister() {} };
@@ -15,7 +17,7 @@ function load(url, custom) {
     media: { contentUrl: url }, custom, window,
     cast: { framework: { PlaybackConfig: class {} } },
     playerManager: { setPlaybackConfig(value) { config = value; } },
-    slog() {}, dolbyFreeCodecs: (codecs) => codecs,
+    slog() {}, dolbyFreeCodecs: (codecs) => codecs, mseCodecs,
   });
   return { config, window };
 }
@@ -40,6 +42,13 @@ assert.equal(request.url, 'http://plex/transcode/universal/video.ts?X-Plex-Token
 // Old senders' packages/direct files retain their own CAF configuration.
 result = load(local, {});
 assert.equal(result.config.shakaConfig, undefined);
+result = load(local, { madeStream: true, streamContainer: 'mp4', streamCodecs: 'hvc1.1.6.L120.B0,Opus' });
+assert.equal(result.config.manifestHandler('#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS="hvc1.1.6.L120.B0,Opus"\nmade.m3u8\n'),
+  '#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS="hvc1.1.6.L120.B0,opus"\nmade.m3u8\n', 'Shaka gets the MSE spelling of Opus');
+assert.equal(result.config.manifestHandler('#EXT-X-STREAM-INF:BANDWIDTH=1\nmade.m3u8\n'),
+  '#EXT-X-STREAM-INF:BANDWIDTH=1,CODECS="hvc1.1.6.L120.B0,opus"\nmade.m3u8\n');
+assert.equal(mseCodecs('avc1.640028,fLaC'), 'avc1.640028,flac');
+assert.equal(mseCodecs('avc1.640028,mp4a.40.2'), 'avc1.640028,mp4a.40.2');
 console.log('made-stream receiver regressions passed');
 const capabilityCode = source.slice(source.indexOf('function capabilities()'), source.indexOf('// Receiver-side logging'));
 const queried = [];

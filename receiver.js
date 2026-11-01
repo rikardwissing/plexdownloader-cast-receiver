@@ -286,6 +286,13 @@ function dolbyFreeCodecs(codecs) {
   return codecs.split(',').map((c) => DOLBY_FREE_VIDEO[c.trim()] || c.trim()).join(',');
 }
 
+// Shaka hands CODECS to MediaSource as written, and a muxed "Opus" fails its append with error 3014.
+const MSE_AUDIO_NAMES = { Opus: 'opus', fLaC: 'flac' };
+function mseCodecs(codecs) {
+  if (!codecs) return codecs;
+  return codecs.split(',').map((c) => MSE_AUDIO_NAMES[c.trim()] || c.trim()).join(',');
+}
+
 function reportLoadFailed(reason, detail) {
   tellSenders(Object.assign({ type: 'loadFailed', reason: String(reason) }, detail || {}));
 }
@@ -1086,7 +1093,7 @@ if (!PREVIEW) {
       // Honest codecs only — the split is routed by the isTypeSupported gate
       // in index.html instead (the marker approach died in Shaka's codec
       // normalizer, measured: avc1.42E01E.pdl -> avc1.2a0NaN).
-      const codecsAttr = dolby ? streamCodecs : dolbyFreeCodecs(streamCodecs);
+      const codecsAttr = mseCodecs(dolby ? streamCodecs : dolbyFreeCodecs(streamCodecs));
       window.__dolbySplitActive = !!dolby;
       // Plex writes NO token into playlist URIs, and relative resolution
       // drops the master's query — so the media playlist, the fMP4
@@ -1110,7 +1117,7 @@ if (!PREVIEW) {
           out = out.replace(/^#EXT-X-STREAM-INF:(.*)$/gm,
             '#EXT-X-STREAM-INF:$1,CODECS="' + codecsAttr + '"');
         }
-        return out;
+        return out.replace(/CODECS="([^"]*)"/g, (whole, list) => 'CODECS="' + mseCodecs(list) + '"');
       };
       playbackConfig.manifestRequestHandler = (request2) => {
         request2.url = withToken(request2.url);
