@@ -26,7 +26,7 @@ if (!PREVIEW) {
 // ---------------------------------------------------------------- diagnostics
 
 function mseSupport(type) {
-  try { return !!window.MediaSource && MediaSource.isTypeSupported(type); }
+  try { return !!window.MediaSource && (window.__realIsTypeSupported || MediaSource.isTypeSupported)(type); }
   catch (e) { return false; }
 }
 

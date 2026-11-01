@@ -237,6 +237,7 @@ window.__dolbySplitActive = false;
 (function () {
   if (!window.MediaSource) return;
   const originalITS = MediaSource.isTypeSupported.bind(MediaSource);
+  window.__realIsTypeSupported = originalITS;
   const loneVideo = /^video\/mp4;\s*codecs="(avc1|avc3|hvc1|hev1)[^,"]*"$/i;
   MediaSource.isTypeSupported = function (type) {
     if (window.__dolbySplitActive && loneVideo.test(String(type || ''))) {
@@ -254,7 +255,7 @@ window.__dolbySplitActive = false;
 <script src="tv-mse.js?v=2026-11-01.3"></script>
 <script src="mkv-engine.js?v=2026-10-31.1"></script>
 <script src="fmp4-split.js?v=2026-10-16.1"></script>
-<script src="receiver.js?v=2026-11-02.1"></script>
+<script src="receiver.js?v=2026-11-02.2"></script>
 <script>
   document.getElementById("receiver-version").textContent = [].map.call(document.scripts, function (s) {
     return (s.src.match(/[?&]v=([^&]+)/) || [])[1] || "";
