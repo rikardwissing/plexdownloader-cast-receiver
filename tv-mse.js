@@ -219,9 +219,9 @@
     var video=info.videoTracks&&info.videoTracks[0];
     this.audioTracks=info.audioTracks||[];
     var audio=this.audioTracks[this.wantAudioIndex]||this.audioTracks[0];
-    if(!video||!audio){playbackError('This video is missing a track the player needs.');return;}
+    if(!video||!audio){playbackError('This video is missing a track it needs to play.');return;}
     var videoType=this.videoType(video.codec);
-    if(!canPlay('video',videoType)){playbackError('This browser can’t decode the video: '+codecName(video.codec)+'.');return;}
+    if(!canPlay('video',videoType)){playbackError('Can’t decode this video’s format: '+codecName(video.codec)+'.');return;}
     /* An undecodable AUDIO track must not end the session. It used to:
        playbackError killed playback outright, and since switching tracks is
        driven from this same engine, the viewer was stranded on the one track
@@ -242,8 +242,8 @@
     if(silent){
       trace('engine audio #'+this.wantAudioIndex+' ('+codecName(audio.codec)+
             ') is undecodable here — playing without sound');
-      playbackNotice('This browser can’t decode '+codecName(audio.codec)+
-                     ' — playing without sound. Pick another track for audio.');
+      playbackNotice('Can’t decode '+codecName(audio.codec)+
+                     ' — playing without audio. Pick another audio track.');
     }
     this.videoTrackId=video.id; this.audioTrackId=silent?null:audio.id;
     if(info.duration&&info.timescale){try{this.mediaSource.duration=info.duration/info.timescale}catch(e){}}
@@ -251,7 +251,7 @@
     try{
       this.buffers.video=this.mediaSource.addSourceBuffer('video/mp4; codecs="'+videoType+'"');
       if(!silent) this.buffers.audio=this.mediaSource.addSourceBuffer('audio/mp4; codecs="'+mimeCodec(audio.codec)+'"');
-    }catch(e){playbackError('This browser can’t decode this format.');return;}
+    }catch(e){playbackError('Can’t decode this video’s format.');return;}
     ['video','audio'].forEach(function(kind){
       /* Silent playback has no audio buffer to wire up. */
       if(self.buffers[kind])self.buffers[kind].addEventListener('updateend',function(){self.drain(kind)});
@@ -264,7 +264,7 @@
     try{
       this.enqueue('video',this.buildInit(video.id,'video'));
       if(!silent) this.enqueue('audio',this.buildInit(audio.id,'audio'));
-    }catch(eInit){playbackError('Could not prepare this video for streaming.');trace('engine init build failed: '+eInit);return;}
+    }catch(eInit){playbackError('Couldn’t prepare this video to play.');trace('engine init build failed: '+eInit);return;}
     var tExtract=nowMs();
     this.resetExtraction();
     var tStart=nowMs();
