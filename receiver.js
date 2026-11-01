@@ -934,7 +934,7 @@ if (!PREVIEW) {
     if (loadFallback) {
       loadFallback = false;
       loadAudioRetry = false;
-      slog('the load failed - waiting for the sender to load a made version');
+      slog('the load failed - waiting for the sender to load a locally transcoded version');
       Subs.clear();
       awaitSenderRetry(verdict);
       return;
@@ -969,18 +969,14 @@ if (!PREVIEW) {
       try { state = playerManager.getPlayerState(); } catch (e) {}
       if (state === messages.PlayerState.PLAYING ||
           state === messages.PlayerState.PAUSED) return;
-      slog('load watchdog: still ' + state + ' after 45s - giving up');
       if (tooTallForDevice() && !audioLikelyUnplayable()) {
+        slog('load watchdog: still ' + state + ' after 45s - too tall for this display');
         refuseTooTall();
         try { playerManager.stop(); } catch (e) {}
         return;
       }
-      reportLoadFailed('the stream never started (still ' + state + ' after 45s)', { track: 'stream' });
-      failOrAwaitAudioRetry(
-        'The stream never started. Its audio or video is likely a format ' +
-        'this TV can\'t play in a stream - Dolby audio only plays from a ' +
-        'direct file.');
-      try { playerManager.stop(); } catch (e) {}
+      slog('load watchdog: still ' + state + ' after 45s - still waiting');
+      tellSenders({ type: 'slowStart', state: String(state) });
     }, 45000);
   }
 
